@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --experimental-strip-types --test tests/logic.test.ts"
   },
   "dependencies": {
     "@paddle/paddle-js": "^1.6.5",

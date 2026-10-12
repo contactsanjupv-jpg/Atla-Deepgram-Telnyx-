@@ -368,7 +368,7 @@ def test_browser_test_call_row_is_completed_by_its_webhook_and_not_billed():
     call = _call_row(cid)
     assert call.direction == CallDirection.test and call.status == "ended" and _count(Call, retell_call_id=cid) == 1
     db = SessionLocal()
-    assert db.query(UsageLedgerEntry).filter_by(retell_call_id=cid).one().kind == "test"
+    assert db.query(UsageLedgerEntry).filter_by(retell_call_id=cid).one().kind == "free_test"
     db.close()
     usage = c.get(f"/api/v1/orgs/{org}/usage").json()
     assert usage["calls_count"] == 0 and usage["billable_seconds"] == 0  # tests are not customer usage

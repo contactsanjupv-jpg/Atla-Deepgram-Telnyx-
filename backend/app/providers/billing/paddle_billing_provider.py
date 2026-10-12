@@ -56,12 +56,7 @@ class PaddleBillingProvider(BillingProvider):
             "custom_data": {"organization_id": organization_id, "plan_id": plan_id},
         }
         try:
-            resp = httpx.post(
-                f"{self._base_url}/transactions",
-                headers=self._headers(),
-                json=body,
-                timeout=15.0,
-            )
+            resp = httpx.post(f"{self._base_url}/transactions", headers=self._headers(), json=body, timeout=15.0)
         except httpx.HTTPError as e:
             raise PaddleAPIError("Could not reach Paddle") from e
         if resp.status_code >= 400:
@@ -90,11 +85,7 @@ class PaddleBillingProvider(BillingProvider):
     def get_management_urls(self, external_subscription_id: str) -> dict:
         """Paddle omits management_urls from webhooks; they come from GET /subscriptions/{id}."""
         try:
-            resp = httpx.get(
-                f"{self._base_url}/subscriptions/{external_subscription_id}",
-                headers=self._headers(),
-                timeout=15.0,
-            )
+            resp = httpx.get(f"{self._base_url}/subscriptions/{external_subscription_id}", headers=self._headers(), timeout=15.0)
         except httpx.HTTPError as e:
             raise PaddleAPIError("Could not reach Paddle") from e
         if resp.status_code >= 400:
@@ -104,11 +95,7 @@ class PaddleBillingProvider(BillingProvider):
     def get_subscription(self, external_subscription_id: str) -> dict | None:
         """Paddle's current view of one subscription; None if Paddle has no such subscription."""
         try:
-            resp = httpx.get(
-                f"{self._base_url}/subscriptions/{external_subscription_id}",
-                headers=self._headers(),
-                timeout=15.0,
-            )
+            resp = httpx.get(f"{self._base_url}/subscriptions/{external_subscription_id}", headers=self._headers(), timeout=15.0)
         except httpx.HTTPError as e:
             raise PaddleAPIError("Could not reach Paddle") from e
         if resp.status_code == 404:
@@ -120,11 +107,7 @@ class PaddleBillingProvider(BillingProvider):
     def get_price(self, price_id: str) -> dict | None:
         """Paddle's price entity (amount, currency, billing cycle); None if Paddle has no such price."""
         try:
-            resp = httpx.get(
-                f"{self._base_url}/prices/{price_id}",
-                headers=self._headers(),
-                timeout=15.0,
-            )
+            resp = httpx.get(f"{self._base_url}/prices/{price_id}", headers=self._headers(), timeout=15.0)
         except httpx.HTTPError as e:
             raise PaddleAPIError("Could not reach Paddle") from e
         if resp.status_code == 404:
@@ -132,3 +115,72 @@ class PaddleBillingProvider(BillingProvider):
         if resp.status_code >= 400:
             raise PaddleAPIError(f"Paddle returned {resp.status_code}", resp.status_code)
         return resp.json().get("data") or None
+
+    def create_topup_transaction(
+        self, *, organization_id: str, topup_id: str, amount_minor: int, currency: str, description: str, display_name: str
+    ) -> CheckoutSession:
+        """
+        A ONE-TIME Paddle transaction for a customer-chosen amount (a non-catalog price). Credits are
+        never granted from this call: only from Paddle's verified transaction.completed webhook (or the
+        reconciler reading the transaction back). custom_data is set server-side, never by the client.
+        """
+        settings = get_settings()
+        price: dict = {
+            "description": description[:500],
+            "name": display_name[:150],
+            "unit_price": {"amount": str(int(amount_minor)), "currency_code": currency},
+        }
+        if settings.PADDLE_TOPUP_PRODUCT_ID:
+            price["product_id"] = settings.PADDLE_TOPUP_PRODUCT_ID
+        else:
+            price["product"] = {"name": "Atla call credits", "tax_category": settings.PADDLE_TOPUP_TAX_CATEGORY}
+        body = {
+            "items": [{"quantity": 1, "price": price}],
+            "currency_code": currency,
+            "collection_mode": "automatic",
+            "custom_data": {"organization_id": organization_id, "kind": "topup", "topup_id": topup_id},
+        }
+        try:
+            resp = httpx.post(f"{self._base_url}/transactions", headers=self._headers(), json=body, timeout=15.0)
+        except httpx.HTTPError as e:
+            raise PaddleAPIError("Could not reach Paddle") from e
+        if resp.status_code >= 400:
+            logger.error("Paddle create top-up transaction failed: %s %s", resp.status_code, resp.text[:500])
+            raise PaddleAPIError(f"Paddle returned {resp.status_code}", resp.status_code)
+        data = resp.json().get("data") or {}
+        url = (data.get("checkout") or {}).get("url")
+        if not url or not data.get("id"):
+            raise PaddleAPIError("Paddle response missing checkout URL — is a default payment link set?")
+        return CheckoutSession(checkout_url=url, provider_session_id=data["id"])
+
+    def get_transaction(self, transaction_id: str) -> dict | None:
+        """Paddle's current view of one transaction (status, items, custom_data); None if it doesn't exist."""
+        try:
+            resp = httpx.get(f"{self._base_url}/transactions/{transaction_id}", headers=self._headers(), timeout=15.0)
+        except httpx.HTTPError as e:
+            raise PaddleAPIError("Could not reach Paddle") from e
+        if resp.status_code == 404:
+            return None
+        if resp.status_code >= 400:
+            raise PaddleAPIError(f"Paddle returned {resp.status_code}", resp.status_code)
+        return resp.json().get("data") or None
+
+    def cancel_transaction(self, transaction_id: str) -> bool:
+        """
+        Best-effort: ask Paddle to cancel a not-yet-paid transaction so the customer can pick another plan.
+        Returns True only if Paddle confirms status "canceled". Paddle documents this for BILLED
+        transactions; for other unpaid states it may refuse — a False means "still payable, do not assume it is dead".
+        """
+        try:
+            resp = httpx.patch(
+                f"{self._base_url}/transactions/{transaction_id}",
+                headers=self._headers(),
+                json={"status": "canceled"},
+                timeout=15.0,
+            )
+        except httpx.HTTPError as e:
+            raise PaddleAPIError("Could not reach Paddle") from e
+        if resp.status_code >= 400:
+            return False
+        return (resp.json().get("data") or {}).get("status") == "canceled"
+

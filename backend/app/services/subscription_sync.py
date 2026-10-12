@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models.billing import Subscription
 from app.db.models.tenancy import Organization
+from app.services.credits import ensure_plan_grant
 from app.services.plans import UNKNOWN_PLAN, plan_id_from_items
 
 logger = logging.getLogger("atla.subscription_sync")
@@ -102,4 +103,9 @@ def sync_subscription(db: Session, data: dict, occurred_at: datetime) -> bool:
     period = data.get("current_billing_period") or {}
     subscription.current_period_start = parse_dt(period.get("starts_at")) or subscription.current_period_start
     subscription.current_period_end = parse_dt(period.get("ends_at")) or subscription.current_period_end
+
+    # Monthly included credits: one grant per billing period, created here for every path that
+    # applies a snapshot (webhook AND reconciler), idempotent by (subscription, period start).
+    db.flush()
+    ensure_plan_grant(db, subscription)
     return True

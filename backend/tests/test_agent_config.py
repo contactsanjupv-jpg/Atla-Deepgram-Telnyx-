@@ -6,6 +6,7 @@ network boundary (RetellClient.request) is faked, so the tests assert on the
 exact payloads Retell would receive.
 """
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -19,6 +20,7 @@ from app.db.models.voice_agent import Agent, Voice
 from app.providers.agent.retell_agent_provider import RetellAgentProvider
 from app.providers.call.retell_call_provider import RetellCallProvider
 from app.providers.retell_client import RetellAPIError, RetellClient
+from app.services.credits import ensure_plan_grant
 from app.services.prompt_builder import truncate_knowledge
 from tests.test_tenant_isolation import _signup
 
@@ -315,11 +317,21 @@ def test_free_test_allowance_is_enforced_until_the_org_pays(fake, monkeypatch):
     assert c.post(url).status_code == 402
     assert len(fake.to("/v2/create-web-call")) == 2  # the blocked attempt cost nothing
 
+    assert "free test call" in c.post(url).json()["detail"]
+
     db = SessionLocal()
-    db.add(Subscription(organization_id=uuid.UUID(org), plan_id="starter", status="active", billing_provider="paddle"))
+    now = datetime.now(timezone.utc)
+    sub = Subscription(
+        organization_id=uuid.UUID(org), plan_id="starter", status="active", billing_provider="paddle",
+        external_subscription_id=f"sub_{uuid.uuid4().hex[:10]}",
+        current_period_start=now - timedelta(days=1), current_period_end=now + timedelta(days=29),
+    )
+    db.add(sub)
+    db.flush()
+    ensure_plan_grant(db, sub)
     db.commit()
     db.close()
-    assert c.post(url).status_code == 200  # paying customers keep testing (daily limit still applies)
+    assert c.post(url).status_code == 200  # paying customers keep testing, spending credits (daily limit still applies)
 
 
 def test_other_tenants_cannot_configure_or_test_my_agent(fake):

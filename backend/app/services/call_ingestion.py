@@ -30,7 +30,8 @@ from app.db.models.crm import Lead
 from app.db.models.platform import WebhookEvent
 from app.db.models.telephony import PhoneNumber
 from app.db.models.voice_agent import Agent
-from app.services.billing_state import current_subscription
+from app.services import free_test
+from app.services.billing_state import ACTIVE_STATUSES, current_subscription
 
 logger = logging.getLogger("atla.calls")
 
@@ -219,8 +220,14 @@ def _upsert_usage(db: Session, call: Call, pcall: dict) -> None:
 
     entry = db.query(UsageLedgerEntry).filter(UsageLedgerEntry.retell_call_id == call.retell_call_id).first()
     if entry is None:
-        kind = "test" if call.direction == CallDirection.test else "production"
-        sub = current_subscription(db, call.organization_id) if kind == "production" else None
+        sub = current_subscription(db, call.organization_id)
+        subscribed = sub is not None and sub.status in ACTIVE_STATUSES
+        if call.direction != CallDirection.test:
+            kind = "production"
+        else:
+            # A test call while subscribed spends credits like any call; before that it is the one
+            # promised free call: recorded (with its real cost) but never charged.
+            kind = "test" if subscribed else "free_test"
         try:
             with db.begin_nested():
                 db.add(
@@ -234,11 +241,13 @@ def _upsert_usage(db: Session, call: Call, pcall: dict) -> None:
                         provider_cost=cost,
                         provider_cost_raw=cost_raw,
                         occurred_at=call.ended_at or datetime.now(timezone.utc),
-                        period_start=sub.current_period_start if sub else None,
-                        period_end=sub.current_period_end if sub else None,
+                        period_start=sub.current_period_start if sub and kind != "free_test" else None,
+                        period_end=sub.current_period_end if sub and kind != "free_test" else None,
                     )
                 )
                 db.flush()
+            if kind == "free_test" and duration_ms == 0:
+                free_test.release_if_never_connected(db, call.retell_call_id)
             return
         except IntegrityError:
             entry = db.query(UsageLedgerEntry).filter(UsageLedgerEntry.retell_call_id == call.retell_call_id).one()

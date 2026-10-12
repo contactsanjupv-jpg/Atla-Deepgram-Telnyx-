@@ -9,13 +9,13 @@ The ONE authoritative definition of plans and what each plan includes.
 * Every server-side feature gate goes through `require_feature` (auth/deps.py),
   which calls into here. Do not compare plan names anywhere else.
 
-COMMERCIAL DECISIONS THAT ARE NOT MADE YET (do not invent them in code):
-  - GROWTH_ONLY is empty: no feature that exists today has been designated
-    Growth-only. Add a Feature member, list it in GROWTH_ONLY, and wrap the
-    route in require_feature(Feature.x) — nothing else changes.
-  - included_minutes is None (= not enforced) for both plans.
-  - The displayed PRICE is never stored here: it is read from the Paddle price
-    behind each plan (services/plan_pricing.py), so it cannot drift from billing.
+Growth-only features are each backed by a real, tested endpoint behind
+require_feature: full transcripts, transcript search, analytics. Do not list a feature here
+unless its route is gated by it.
+
+Included minutes come from settings (STARTER/GROWTH_INCLUDED_MINUTES), derived by
+`python -m app.workers.pricing_report`. The displayed PRICE is never stored here: it is read
+from the Paddle price behind each plan (services/plan_pricing.py), so it cannot drift from billing.
 """
 import logging
 import uuid
@@ -35,15 +35,38 @@ UNKNOWN_PLAN = "unknown"
 class Feature(str, Enum):
     phone_number = "phone_number"  # buy / keep a real business number (costs us money)
     go_live = "go_live"  # route real calls to the receptionist (costs us money)
+    transcripts = "transcripts"  # read the full conversation, not just the summary (Growth)
+    transcript_search = "transcript_search"  # search what callers said across all calls (Growth)
+    analytics = "analytics"  # call / lead / usage trends over time (Growth)
 
 
 FEATURE_LABELS: dict[Feature, str] = {
     Feature.phone_number: "A dedicated business phone number",
     Feature.go_live: "Your receptionist answers real calls",
+    Feature.transcripts: "Full conversation transcripts, with who said what and when",
+    Feature.transcript_search: "Search everything your callers said",
+    Feature.analytics: "Call, lead and usage analytics over time",
 }
 
 STARTER_FEATURES: frozenset[Feature] = frozenset({Feature.phone_number, Feature.go_live})
-GROWTH_ONLY_FEATURES: frozenset[Feature] = frozenset()
+GROWTH_ONLY_FEATURES: frozenset[Feature] = frozenset(
+    {Feature.transcripts, Feature.transcript_search, Feature.analytics}
+)
+
+# True for every plan today and not gated (they do not cost us more per customer): shown on both cards.
+BASELINE_INCLUDED: tuple[str, ...] = (
+    "Call history with an AI summary of every call",
+    "Lead capture and lead management",
+    "Credits used, credits remaining and calls handled",
+)
+
+def when_credits_run_out() -> str:
+    """Customer-facing policy text, built from the real settings so it can never disagree with them."""
+    s = get_settings()
+    return (
+        f"When your included minutes run out, you can buy more any time (from ${s.TOPUP_MIN_CENTS / 100:,.0f}). "
+        "Your receptionist keeps answering for a short grace period, then pauses until you add credits."
+    )
 
 
 @dataclass(frozen=True)
@@ -52,12 +75,14 @@ class Plan:
     name: str  # customer-facing
     rank: int
     features: frozenset[Feature]
-    included_minutes: int | None = None  # None = not enforced (pricing decision pending)
+    included_minutes: int = 0  # monthly allowance (settings); never rolls over
 
+
+_settings = get_settings()
 
 PLANS: dict[str, Plan] = {
-    "starter": Plan("starter", "Starter", 1, STARTER_FEATURES),
-    "growth": Plan("growth", "Growth", 2, STARTER_FEATURES | GROWTH_ONLY_FEATURES),
+    "starter": Plan("starter", "Starter", 1, STARTER_FEATURES, _settings.STARTER_INCLUDED_MINUTES),
+    "growth": Plan("growth", "Growth", 2, STARTER_FEATURES | GROWTH_ONLY_FEATURES, _settings.GROWTH_INCLUDED_MINUTES),
 }
 
 _PRICE_SETTING = {"starter": "PADDLE_STARTER_PRICE_ID", "growth": "PADDLE_GROWTH_PRICE_ID"}

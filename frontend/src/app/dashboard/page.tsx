@@ -5,6 +5,8 @@ import Link from "next/link";
 import { Mic, PhoneCall, Plus } from "lucide-react";
 import { useOrganization } from "@/lib/useOrganization";
 import { api, AgentOut, CallOut, LeadOut, UsageOut } from "@/lib/api";
+import { AnalyticsPanel } from "@/components/credits/AnalyticsPanel";
+import { CreditsPanel } from "@/components/credits/CreditsPanel";
 import { DashboardShell, LoadingScreen, ErrorScreen } from "@/components/dashboard/DashboardShell";
 
 export default function DashboardOverview() {
@@ -45,7 +47,10 @@ export default function DashboardOverview() {
           {org?.name} · {dataLoading ? "loading…" : `${calls.length} recent calls, ${leads.length} recent leads`}
       </p>
 
-    {!dataLoading && agent && agent.status !== "active" && (
+    {org && <CreditsPanel orgId={org.id} isOwner={org.role === "owner"} />}
+{org && <AnalyticsPanel orgId={org.id} />}
+
+{!dataLoading && agent && agent.status !== "active" && (
      <div className="mt-6 rounded-2xl border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-6">
      <div className="text-[12.5px] font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
           Not live yet
@@ -129,7 +134,7 @@ export default function DashboardOverview() {
             </div>
           </div>
 
-          <div>
+          <div className="min-w-0">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-[15px] font-semibold">Recent leads</h2>
               <Link href="/dashboard/leads" className="text-[13px] text-[var(--color-ink-soft)] hover:text-[var(--color-ink)]">

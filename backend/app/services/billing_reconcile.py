@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models.billing import Subscription
 from app.services.billing_state import ACTIVE_STATUSES
+from app.services.credits import ensure_plan_grant
 from app.services.duplicate_subscriptions import schedule_duplicate_cancellations
 from app.services.plans import plan_id_from_items
 from app.services.subscription_sync import parse_dt, sync_subscription
@@ -50,6 +51,8 @@ class ReconcileReport:
     errors: list[str] = field(default_factory=list)
     duplicate_active_orgs: list[str] = field(default_factory=list)
     duplicate_cancels_requested: list[str] = field(default_factory=list)
+    missing_grants: list[str] = field(default_factory=list)  # active subscriptions with no credits for the current period
+    grants_created: list[str] = field(default_factory=list)
 
 
 def _utc(dt):
@@ -73,6 +76,36 @@ def _differences(local: Subscription, remote: dict) -> dict[str, tuple]:
     if _utc(local.cancel_effective_at) != _utc(remote_cancel):
         diffs["cancel_effective_at"] = (local.cancel_effective_at, remote_cancel)
     return diffs
+
+
+def _ensure_grants(db: Session, report: ReconcileReport, apply: bool) -> None:
+    """Every active subscription must hold its included credits for the CURRENT period (one grant, idempotent)."""
+    from datetime import datetime
+    from app.db.models.billing import CreditLedgerEntry
+
+    now = datetime.now(timezone.utc)
+    for sub in db.query(Subscription).filter(Subscription.status.in_(ACTIVE_STATUSES)).all():
+        if not sub.current_period_start or not sub.current_period_end or sub.current_period_end <= now:
+            continue
+        has = (
+            db.query(CreditLedgerEntry.id)
+            .filter(
+                CreditLedgerEntry.organization_id == sub.organization_id,
+                CreditLedgerEntry.kind == "plan_grant",
+                CreditLedgerEntry.period_start == sub.current_period_start,
+            )
+            .first()
+            is not None
+        )
+        if has:
+            continue
+        label = sub.external_subscription_id or str(sub.id)
+        if not apply:
+            report.missing_grants.append(label)
+        elif ensure_plan_grant(db, sub, now):
+            report.grants_created.append(label)
+    if apply:
+        db.commit()
 
 
 def reconcile_subscriptions(db: Session, provider, apply: bool = False) -> ReconcileReport:
@@ -120,6 +153,7 @@ def reconcile_subscriptions(db: Session, provider, apply: bool = False) -> Recon
                     logger.exception("Reconcile: repair failed for %s", external_id)
                     drift.note = "repair failed"
         report.drifted.append(drift)
+    _ensure_grants(db, report, apply)
     dupes = (
         db.query(Subscription.organization_id)
         .filter(Subscription.billing_provider == "paddle", Subscription.status.in_(ACTIVE_STATUSES))

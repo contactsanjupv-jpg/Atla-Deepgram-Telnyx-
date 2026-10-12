@@ -106,7 +106,17 @@ def _checkout_posts(monkeypatch):
         n = len(posts)
         return _FakeResp(201, {"data": {"id": f"txn_{n}", "checkout": {"url": f"http://localhost:3000/checkout?_ptxn=txn_{n}"}}})
 
+    def fake_get(url, headers=None, timeout=None, **_):
+        # Paddle's own view of the transaction: created and payable, not paid (services/checkout_recovery.py reads this)
+        txn = url.rsplit("/", 1)[-1]
+        return _FakeResp(200, {"data": {"id": txn, "status": "ready"}})
+
+    def fake_patch(url, headers=None, json=None, timeout=None):
+        return _FakeResp(400, {"error": {"code": "transaction_cannot_be_canceled"}})  # Paddle refuses: the old one stays payable
+
     monkeypatch.setattr(pp.httpx, "post", fake_post)
+    monkeypatch.setattr(pp.httpx, "get", fake_get)
+    monkeypatch.setattr(pp.httpx, "patch", fake_patch)
     return posts
 
 
@@ -120,7 +130,7 @@ def test_same_plan_checkout_twice_reuses_one_paddle_transaction(monkeypatch):
     assert len(posts) == 1
 
 
-def test_a_different_plan_while_a_checkout_is_open_is_refused_and_creates_nothing(monkeypatch):
+def test_a_different_plan_while_a_checkout_is_open_is_refused_when_paddle_will_not_cancel_the_old_one(monkeypatch):
     posts = _checkout_posts(monkeypatch)
     c, org = _new_org()
     assert c.post(f"/api/v1/orgs/{org}/billing/checkout-session", json={"plan": "starter"}).status_code == 200

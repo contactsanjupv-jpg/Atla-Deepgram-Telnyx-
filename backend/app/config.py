@@ -51,11 +51,41 @@ class Settings(BaseSettings):
     AGENT_MAX_CALL_SECONDS: int = 900
     # Cap on business-knowledge text placed in the agent prompt (cost + latency).
     AGENT_KNOWLEDGE_MAX_CHARS: int = 24000
-    # Free browser test calls an org may start BEFORE it has an active
-    # subscription (lifetime). Each one costs real Retell money.
-    FREE_TEST_CALLS_PER_ORG: int = 5
-    # The browser auto-ends a test call after this many seconds.
+    # Free browser test calls a prospect gets BEFORE paying — lifetime, per organization AND per
+    # user account (a database uniqueness rule, see services/free_test.py). Each one costs real
+    # Retell money. Product policy: exactly one.
+    FREE_TEST_CALLS_PER_ORG: int = 1
+    # The browser auto-ends a test call after this many seconds. A paid test call must be covered
+    # by at least this many available credit seconds before it starts.
     TEST_CALL_MAX_SECONDS: int = 180
+
+    # ---- Credits (see services/credits.py). Unit: seconds in the database, minutes on screen. ----
+    # Monthly included allowance per plan, in minutes. DERIVED, not guessed — python -m
+    # app.workers.pricing_report recomputes them from the inputs below. Re-run it when any input
+    # changes (Retell rates, your LLM choice, Paddle fees, the Paddle price) and update these.
+    STARTER_INCLUDED_MINUTES: int = 180
+    GROWTH_INCLUDED_MINUTES: int = 480
+    # Inputs to that calculation. Provider rate: Retell reports call_cost.combined_cost in CENTS
+    # (documented; consistent with the one real test call: 12.13 cents for 44 s ~ 16.5 cents/min).
+    # 18 is that observed rate plus headroom. INTERNAL — never sent to customers.
+    COST_BASIS_CENTS_PER_MINUTE: int = 18
+    PADDLE_FEE_PERCENT: int = 5
+    PADDLE_FEE_FIXED_CENTS: int = 50
+    PHONE_NUMBER_CENTS_PER_MONTH: int = 200
+    TARGET_GROSS_MARGIN_PERCENT: int = 50
+    # Top-ups: customer-chosen amount in USD cents, priced per minute of call time.
+    TOPUP_MIN_CENTS: int = 2000
+    TOPUP_MAX_CENTS: int = 50000
+    TOPUP_CENTS_PER_MINUTE: int = 45
+    # Paddle tax category for the one-time top-up product (must be enabled on your Paddle account),
+    # OR set PADDLE_TOPUP_PRODUCT_ID to reuse an existing catalog product instead.
+    PADDLE_TOPUP_TAX_CATEGORY: str = "saas"
+    PADDLE_TOPUP_PRODUCT_ID: str = ""
+    # Calls cannot be refused mid-flight, so production calls may run this far below zero before the
+    # receptionist is switched off until the customer buys credits (same sweeper as billing lapse).
+    OVERAGE_GRACE_MINUTES: int = 30
+    # Below this share of the monthly allowance (or fewer than this many minutes) the dashboard warns.
+    LOW_CREDIT_PERCENT: int = 20
 
     # Paddle (billing) — server-side only
     PADDLE_ENV: str = "sandbox"  # "sandbox" | "live"

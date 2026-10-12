@@ -11,6 +11,7 @@ import argparse
 from app.db.base import SessionLocal
 from app.providers.billing.paddle_billing_provider import PaddleBillingProvider
 from app.services.billing_reconcile import reconcile_subscriptions
+from app.services.topups import reconcile_topups
 
 
 def main() -> int:
@@ -21,6 +22,7 @@ def main() -> int:
     db = SessionLocal()
     try:
         report = reconcile_subscriptions(db, PaddleBillingProvider(), apply=args.apply)
+        topup_result = reconcile_topups(db, PaddleBillingProvider()) if args.apply else None
     finally:
         db.close()
 
@@ -33,11 +35,18 @@ def main() -> int:
         print(f"  DRIFT {d.external_subscription_id} (org {d.organization_id}): {fields} -> {state}")
     for sid in report.missing_at_paddle:
         print(f"  MISSING AT PADDLE {sid} — not changed; review manually")
+    for sid in report.missing_grants:
+        print(f"  NO CREDITS GRANTED for the current period of {sid} — needs --apply")
+    for sid in report.grants_created:
+        print(f"  GRANTED current-period credits for {sid}")
+    if topup_result is not None:
+        print(f"top-ups: {topup_result}")
     for oid in report.duplicate_active_orgs:
         print(f"  DUPLICATE ACTIVE SUBSCRIPTIONS for org {oid} — customer may be charged twice; review a refund")
     for sid in report.duplicate_cancels_requested:
         print(f"  CANCEL AT PERIOD END requested for duplicate subscription {sid}")
-    return 1 if (report.drifted and not args.apply) or report.duplicate_active_orgs else 0
+    unsettled = (report.drifted or report.missing_grants) and not args.apply
+    return 1 if unsettled or report.duplicate_active_orgs else 0
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db.base import get_db
 from app.db.models.platform import WebhookEvent, WebhookSource
+from app.services import topups
 from app.services.duplicate_subscriptions import after_subscription_applied
 from app.services.subscription_sync import parse_dt as _parse_dt
 from app.services.subscription_sync import sync_subscription as _sync_subscription
@@ -33,6 +34,7 @@ _SUBSCRIPTION_EVENTS = {
     "subscription.paused",
     "subscription.resumed",
 }
+_TOPUP_FAILURE_EVENTS = {"transaction.canceled", "transaction.payment_failed", "transaction.past_due"}
 
 
 def verify_paddle_signature(
@@ -101,6 +103,12 @@ async def handle_paddle_webhook(
     try:
         if event_type in _SUBSCRIPTION_EVENTS:
             _sync_subscription(db, data, occurred_at)
+        elif event_type == "transaction.completed" and topups.is_topup_transaction(data):
+            topups.complete_topup(db, data)  # the ONLY place (besides the reconciler) credits are granted
+        elif event_type in _TOPUP_FAILURE_EVENTS and topups.is_topup_transaction(data):
+            topups.fail_topup(db, data)
+        elif event_type in ("adjustment.created", "adjustment.updated"):
+            topups.apply_adjustment(db, data)
         else:
             logger.info("Unhandled Paddle event type: %s", event_type)
         record.processed_at = datetime.now(timezone.utc)

@@ -150,6 +150,9 @@ export interface PlanOut {
   name: string;
   features: PlanFeature[];
   price: PlanPrice | null; // null when billing can't be read — show no number, never a wrong one
+  included_minutes: number; // monthly receptionist minutes included (the same number the credit ledger grants)
+  baseline: string[]; // what every plan includes besides `features`
+  when_credits_run_out: string;
 }
 
 export interface SubscriptionOut {
@@ -186,6 +189,99 @@ export interface UsageOut {
   period_end: string | null;
   calls_count: number;
   billable_seconds: number;
+}
+
+export interface CreditsOut {
+  entitled: boolean;
+  plan_name: string | null;
+  period_start: string | null;
+  period_end: string | null;
+  included_granted_seconds: number;
+  included_used_seconds: number;
+  included_remaining_seconds: number;
+  purchased_balance_seconds: number; // negative = owed after a refund
+  available_seconds: number;
+  status: "ok" | "low" | "empty";
+  calls_handled: number;
+  topup_min_minor: number;
+  topup_max_minor: number;
+  topup_cents_per_minute: number;
+  free_test_calls_remaining: number;
+  when_credits_run_out: string;
+}
+
+export interface DailyPoint {
+  date: string; // YYYY-MM-DD in the viewer's timezone
+  calls: number;
+  credit_seconds: number;
+}
+
+export interface CreditEvent {
+  id: string;
+  kind: "plan_grant" | "topup" | "refund" | "chargeback" | "adjustment";
+  seconds: number;
+  note: string | null;
+  occurred_at: string;
+}
+
+export interface TopupQuote {
+  amount_minor: number;
+  currency: string;
+  credit_minutes: number;
+  cents_per_minute: number;
+}
+
+export interface TopupPurchase {
+  id: string;
+  amount_minor: number;
+  currency: string;
+  credit_minutes: number;
+  status: string;
+  created_at: string;
+}
+
+export interface CheckoutState {
+  state: "none" | "open" | "processing" | "expired" | "unconfirmed";
+  plan: string | null;
+  checkout_url: string | null;
+  message: string;
+  expires_in_seconds: number | null;
+}
+
+export interface TranscriptSegment {
+  speaker: string; // "Receptionist" | "Caller"
+  role: string;
+  text: string;
+  start_seconds: number | null;
+  end_seconds: number | null;
+}
+
+export interface CallSearchHit {
+  call_id: string;
+  direction: string;
+  caller_number: string | null;
+  started_at: string | null;
+  summary: string | null;
+  matches: { speaker: string; snippet: string; start_seconds: number | null }[];
+  match_count: number;
+}
+
+export interface AnalyticsDay {
+  date: string;
+  calls: number;
+  credit_seconds: number;
+  leads: number;
+}
+
+export interface AnalyticsOut {
+  days: number;
+  series: AnalyticsDay[];
+  total_calls: number;
+  total_credit_seconds: number;
+  total_leads: number;
+  leads_by_status: Record<string, number>;
+  leads_awaiting_follow_up: number;
+  oldest_unattended_lead_at: string | null;
 }
 
 export interface CallOut {
@@ -402,6 +498,19 @@ export const api = {
       `/api/v1/orgs/${orgId}/billing/manage`,
     ),
 
+  getCredits: (orgId: string) => request<CreditsOut>(`/api/v1/orgs/${orgId}/usage/credits`),
+  getDailyUsage: (orgId: string, days: number, tz: string) =>
+    request<DailyPoint[]>(`/api/v1/orgs/${orgId}/usage/daily?${new URLSearchParams({ days: String(days), tz })}`),
+  getCreditEvents: (orgId: string) => request<CreditEvent[]>(`/api/v1/orgs/${orgId}/usage/events?limit=10`),
+  getTopupQuote: (orgId: string, amountMinor: number) =>
+    request<TopupQuote>(`/api/v1/orgs/${orgId}/billing/topup-quote?${new URLSearchParams({ amount_minor: String(amountMinor) })}`),
+  createTopup: (orgId: string, amountMinor: number) =>
+    request<{ checkout_url: string; amount_minor: number; credit_minutes: number }>(`/api/v1/orgs/${orgId}/billing/topups`, {
+      method: "POST",
+      body: JSON.stringify({ amount_minor: amountMinor }),
+    }),
+  listTopups: (orgId: string) => request<TopupPurchase[]>(`/api/v1/orgs/${orgId}/billing/topups`),
+  getCheckoutState: (orgId: string) => request<CheckoutState>(`/api/v1/orgs/${orgId}/billing/checkout`),
   getSubscription: (orgId: string) =>
     request<SubscriptionOut | null>(
       `/api/v1/orgs/${orgId}/billing/subscription`,
@@ -511,16 +620,12 @@ export const api = {
       `/api/v1/orgs/${orgId}/calls/${callId}`,
     ),
 
-  getCallTranscript: (
-    orgId: string,
-    callId: string,
-  ) =>
-    request<{
-      call_id: string;
-      transcript: unknown[];
-    }>(
-      `/api/v1/orgs/${orgId}/calls/${callId}/transcript`,
-    ),
+  getCallTranscript: (orgId: string, callId: string) =>
+    request<{ call_id: string; segments: TranscriptSegment[]; text: string | null }>(`/api/v1/orgs/${orgId}/calls/${callId}/transcript`),
+  searchCalls: (orgId: string, q: string) =>
+    request<CallSearchHit[]>(`/api/v1/orgs/${orgId}/calls/search?${new URLSearchParams({ q })}`),
+  getAnalytics: (orgId: string, days: number, tz: string) =>
+    request<AnalyticsOut>(`/api/v1/orgs/${orgId}/analytics/overview?${new URLSearchParams({ days: String(days), tz })}`),
 
   listLeads: (
     orgId: string,

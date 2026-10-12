@@ -10,5 +10,11 @@ from app.db.models.telephony import PhoneNumber, PhoneNumberStatus, PhoneProvisi
 from app.db.models.calls import Call, CallTranscript, CallDirection  # noqa: F401
 from app.db.models.crm import Lead, LeadStatus, Appointment, AppointmentStatus  # noqa: F401
 from app.db.models.integrations import Integration, IntegrationProvider, IntegrationStatus  # noqa: F401
-from app.db.models.billing import Subscription, UsageLedgerEntry  # noqa: F401
+from app.db.models.billing import (  # noqa: F401
+    CreditLedgerEntry,
+    FreeTestAllowance,
+    Subscription,
+    TopupPurchase,
+    UsageLedgerEntry,
+)
 from app.db.models.platform import WebhookEvent, WebhookSource, AuditLog, AdminUser  # noqa: F401

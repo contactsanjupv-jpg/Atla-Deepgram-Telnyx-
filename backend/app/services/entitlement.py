@@ -8,6 +8,10 @@ configurable (config.PAST_DUE_GRACE_DAYS, NUMBER_RELEASE_DELAY_DAYS):
                                  -> SUSPENDED: number unassigned (calls stop being
                                     answered, stop costing minutes), agent paused
     suspended for N days ....... number released (stops the $2/mo)
+    active but OUT OF CREDITS beyond the overage grace (config.OVERAGE_GRACE_MINUTES)
+                                 -> PAUSED the same way, but the number is KEPT: the
+                                    customer paid for it. Buying credits and pressing
+                                    "Go live" resumes service.
 
 Every step is idempotent and retried by the sweeper; a provider failure for one
 org never blocks another and leaves state to be retried.
@@ -23,6 +27,7 @@ from app.db.models.telephony import PhoneNumber, PhoneNumberStatus
 from app.db.models.voice_agent import Agent, AgentStatus
 from app.providers.phone.phone_provider import PhoneProvider
 from app.services.billing_state import current_subscription, has_active_subscription
+from app.services.credits import credits_exhausted_beyond_grace
 from app.services.phone_provisioning import release_number
 
 logger = logging.getLogger("atla.entitlement")
@@ -32,7 +37,8 @@ settings = get_settings()
 def suspended_since(db: Session, org_id: uuid.UUID, now: datetime) -> datetime | None:
     """None while service is entitled; otherwise when suspension began."""
     if has_active_subscription(db, org_id):
-        return None
+        # Paid up, but the allowance AND purchased balance are spent beyond the grace: stop spending our money.
+        return now if credits_exhausted_beyond_grace(db, org_id, now) else None
     sub = current_subscription(db, org_id)
     if sub is None:
         return now  # no subscription at all but live resources: suspend immediately

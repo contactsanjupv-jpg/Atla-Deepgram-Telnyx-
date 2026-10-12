@@ -14,6 +14,7 @@ from app.core.error_handling import unhandled_exception_handler
 from app.core.security_headers import SecurityHeadersMiddleware
 from app.webhooks.retell import router as retell_webhook_router
 from app.api.v1.account import router as account_router
+from app.api.v1.analytics import router as analytics_router
 from app.api.v1.billing import router as billing_router
 from app.api.v1.onboarding import router as onboarding_router
 from app.api.v1.plans import router as plans_router
@@ -49,6 +50,7 @@ app.include_router(billing_router)
 app.include_router(plans_router)
 app.include_router(paddle_webhook_router)
 app.include_router(usage_router)
+app.include_router(analytics_router)
 app.include_router(onboarding_router)
 app.include_router(account_router)
 

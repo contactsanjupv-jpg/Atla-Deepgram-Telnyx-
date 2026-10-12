@@ -7,7 +7,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.services.plan_pricing import price_for_plan
-from app.services.plans import FEATURE_LABELS, PLANS, Feature
+from app.services.plans import BASELINE_INCLUDED, FEATURE_LABELS, PLANS, Feature, when_credits_run_out
 
 router = APIRouter(prefix="/api/v1/plans", tags=["plans"])
 
@@ -29,6 +29,9 @@ class PlanOut(BaseModel):
     name: str
     features: list[PlanFeatureOut]
     price: PlanPriceOut | None  # None when Paddle can't be read — show no number, never a wrong one
+    included_minutes: int  # monthly AI-receptionist minutes included; the same number the credit ledger grants
+    baseline: list[str]  # what every plan includes besides `features` (call history, leads, usage)
+    when_credits_run_out: str
 
 
 @router.get("", response_model=list[PlanOut])
@@ -41,6 +44,9 @@ def list_plans():
                 name=plan.name,
                 features=[PlanFeatureOut(id=f.value, label=FEATURE_LABELS[f]) for f in Feature if f in plan.features],
                 price=price_for_plan(plan.id),
+                included_minutes=plan.included_minutes,
+                baseline=list(BASELINE_INCLUDED),
+                when_credits_run_out=when_credits_run_out(),
             )
         )
     return out

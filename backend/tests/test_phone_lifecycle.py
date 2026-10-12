@@ -353,9 +353,13 @@ def test_a_paddle_cancellation_webhook_drives_the_downstream_shutdown(phone, mon
 
     c, org = _org(paid=False)
     sub = f"sub_{uuid.uuid4().hex[:10]}"
-    assert paddle_post(_event("subscription.created", sub, org, at="2026-10-01T00:00:00.000000Z")).status_code == 204
+    # Relative to now: fixed dates would eventually be older than NUMBER_RELEASE_DELAY_DAYS and the number would be released too.
+    fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
+    created_at = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime(fmt)
+    canceled_at = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(fmt)
+    assert paddle_post(_event("subscription.created", sub, org, at=created_at)).status_code == 204
     phone_id, agent_id = _live(phone, c, org)
-    assert paddle_post(_event("subscription.canceled", sub, org, status="canceled", at="2026-10-02T00:00:00.000000Z")).status_code == 204
+    assert paddle_post(_event("subscription.canceled", sub, org, status="canceled", at=canceled_at)).status_code == 204
     assert _enforce(phone, org)["suspended"] == 1
     assert _state(agent_id, phone_id)[0] == AgentStatus.paused and phone.numbers[_numbers(org)[0].number]["agent"] is None
 
