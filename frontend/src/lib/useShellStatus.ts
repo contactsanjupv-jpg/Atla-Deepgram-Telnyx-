@@ -9,6 +9,7 @@ interface ShellData {
   agent: AgentOut | null;
   agentKnown: boolean;
   phone: PhoneNumberOut | null;
+  phoneKnown: boolean;
   sub: SubscriptionOut | null | undefined; // undefined = couldn't be read
 }
 
@@ -36,9 +37,11 @@ function fetchShell(orgId: string): Promise<ShellData> {
       const data: ShellData = {
         agentKnown: agents.status === "fulfilled",
         agent: agents.status === "fulfilled" ? (agents.value[0] ?? null) : null,
+        phoneKnown: phones.status === "fulfilled",
         phone: phones.status === "fulfilled" ? (phones.value.find((n) => n.status === "active") ?? null) : null,
         sub: sub.status === "fulfilled" ? sub.value : undefined,
       };
+
       cache.set(orgId, { at: Date.now(), data });
       return data;
     })
@@ -68,7 +71,18 @@ export function useShellStatus(orgId: string | undefined) {
     };
   }, [orgId]);
 
-  if (!data) return { loading: true, status: null as ReceptionistStatus | null, plan: null as PlanChip | null, canTest: false };
+    if (!data)
+    return {
+      loading: true,
+      status: null as ReceptionistStatus | null,
+      plan: null as PlanChip | null,
+      canTest: false,
+      agent: null as AgentOut | null,
+      phone: null as PhoneNumberOut | null,
+      sub: undefined as SubscriptionOut | null | undefined,
+      agentKnown: false,
+      phoneKnown: false,
+    };
 
   const status = data.agentKnown ? receptionistStatus({ agent: data.agent, phone: data.phone, sub: data.sub }) : null;
   let plan: PlanChip | null = null;
@@ -77,5 +91,5 @@ export function useShellStatus(orgId: string | undefined) {
     const info = describeSubscription(data.sub);
     plan = { name: data.sub.plan_name ?? "Your plan", state: info.label, tone: info.tone };
   }
-  return { loading: false, status, plan, canTest: data.agentKnown && data.agent !== null };
+  return { loading: false, status, plan, canTest: data.agentKnown && data.agent !== null, agent: data.agent, phone: data.phone, sub: data.sub, agentKnown: data.agentKnown, phoneKnown: data.phoneKnown };
 }

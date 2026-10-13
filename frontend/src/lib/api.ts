@@ -283,6 +283,38 @@ export interface AnalyticsOut {
   leads_awaiting_follow_up: number;
   oldest_unattended_lead_at: string | null;
 }
+export interface DashboardBucket {
+  start: string; // local time of the bucket: "2026-10-12T14:00:00" (hourly) or "2026-10-12" (daily)
+  calls: number;
+  call_seconds: number;
+  leads: number;
+}
+
+export interface DashboardTotals {
+  calls: number;
+  call_seconds: number;
+  leads: number;
+}
+
+export interface AwaitingLead {
+  id: string;
+  name: string | null;
+  phone: string | null;
+  reason: string | null;
+  created_at: string;
+  call_id: string | null;
+}
+
+export interface DashboardSummary {
+  range: "today" | "7d" | "30d";
+  granularity: "hour" | "day";
+  series: DashboardBucket[];
+  totals: DashboardTotals;
+  previous: DashboardTotals;
+  leads_awaiting_follow_up: number;
+  oldest_unattended_lead_at: string | null;
+  awaiting_leads: AwaitingLead[];
+}
 
 export interface CallOut {
   id: string;
@@ -511,6 +543,8 @@ export const api = {
     }),
   listTopups: (orgId: string) => request<TopupPurchase[]>(`/api/v1/orgs/${orgId}/billing/topups`),
   getCheckoutState: (orgId: string) => request<CheckoutState>(`/api/v1/orgs/${orgId}/billing/checkout`),
+  getDashboardSummary: (orgId: string, range: "today" | "7d" | "30d", tz: string) =>
+  request<DashboardSummary>(`/api/v1/orgs/${orgId}/dashboard/summary?${new URLSearchParams({ range, tz })}`),
   getSubscription: (orgId: string) =>
     request<SubscriptionOut | null>(
       `/api/v1/orgs/${orgId}/billing/subscription`,

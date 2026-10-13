@@ -14,7 +14,7 @@ const RANGES = [
 ] as const;
 
 /** Credits and usage: real balance, real daily usage, a working "Buy more credits". Nothing here is estimated. */
-export function CreditsPanel({ orgId, isOwner }: { orgId: string; isOwner: boolean }) {
+export function CreditsPanel({ orgId, isOwner, showUsage = true }: { orgId: string; isOwner: boolean; showUsage?: boolean }) {
   const [credits, setCredits] = useState<CreditsOut | null>(null);
   const [events, setEvents] = useState<CreditEvent[]>([]);
   const [points, setPoints] = useState<DailyPoint[]>([]);
@@ -54,6 +54,7 @@ export function CreditsPanel({ orgId, isOwner }: { orgId: string; isOwner: boole
   }, [fetchCredits]);
 
   useEffect(() => {
+    if (!showUsage) return;
     let live = true;
     api
       .getDailyUsage(orgId, days, browserTimeZone())
@@ -66,7 +67,7 @@ export function CreditsPanel({ orgId, isOwner }: { orgId: string; isOwner: boole
     return () => {
       live = false;
     };
-  }, [orgId, days]);
+  }, [orgId, days, showUsage]);
 
   useEffect(() => () => {
     if (pollRef.current) clearInterval(pollRef.current);
@@ -195,7 +196,8 @@ export function CreditsPanel({ orgId, isOwner }: { orgId: string; isOwner: boole
           <p className="mt-1 text-[12.5px] text-[var(--color-ink-soft)]">{credits.when_credits_run_out}</p>
         </>
       )}
-
+{showUsage && (
+  <>
       <div className="mt-6 flex items-center justify-between gap-3">
         <h3 className="text-[13.5px] font-semibold">Usage</h3>
         <div role="tablist" aria-label="Usage range" className="flex rounded-full border border-[var(--color-line)] p-0.5">
@@ -220,6 +222,8 @@ export function CreditsPanel({ orgId, isOwner }: { orgId: string; isOwner: boole
           <UsageChart title="Minutes used" points={points} pick={(p) => p.credit_seconds} format={(v) => minutesLabel(v)} emptyText="No minutes used in this period yet." />
         </div>
       )}
+    </>
+  )}
 
       <h3 className="mt-6 text-[13.5px] font-semibold">Credit activity</h3>
       {events.length === 0 ? (

@@ -1,160 +1,123 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import Link from "next/link";
-import { Mic, PhoneCall, Plus } from "lucide-react";
+import { useState } from "react";
 import { useOrganization } from "@/lib/useOrganization";
-import { api, AgentOut, CallOut, LeadOut, UsageOut } from "@/lib/api";
-import { AnalyticsPanel } from "@/components/credits/AnalyticsPanel";
-import { CreditsPanel } from "@/components/credits/CreditsPanel";
+import { api } from "@/lib/api";
+import { browserTimeZone, dayLabel, minutesLabel } from "@/lib/credits";
+import { RANGES, attentionItems, hourLabel, type DashboardRange } from "@/lib/dashboard";
+import { useLoad } from "@/lib/useLoad";
+import { useShellStatus } from "@/lib/useShellStatus";
 import { DashboardShell, LoadingScreen, ErrorScreen } from "@/components/dashboard/DashboardShell";
+import { StatusCards } from "@/components/dashboard/StatusCards";
+import { AttentionList } from "@/components/dashboard/AttentionList";
+import { MetricCards } from "@/components/dashboard/MetricCards";
+import { RangeTabs } from "@/components/dashboard/RangeTabs";
+import { RecentCalls, WaitingLeads } from "@/components/dashboard/ActivityLists";
+import { UsageChart } from "@/components/credits/UsageChart";
+import { CreditsPanel } from "@/components/credits/CreditsPanel";
+import { AnalyticsPanel } from "@/components/credits/AnalyticsPanel";
 
 export default function DashboardOverview() {
   const { org, loading, error } = useOrganization();
-  const [calls, setCalls] = useState<CallOut[]>([]);
-  const [leads, setLeads] = useState<LeadOut[]>([]);
-  const [agent, setAgent] = useState<AgentOut | null>(null);
-  const [usage, setUsage] = useState<UsageOut | null>(null);
-  const [dataLoading, setDataLoading] = useState(true);
+  const orgId = org?.id;
+  const [range, setRange] = useState<DashboardRange>("7d");
+  const shell = useShellStatus(orgId);
 
-  useEffect(() => {
-    if (!org) return;
-    Promise.all([
-        api.listCalls(org.id, { limit: 5 }),
-        api.listLeads(org.id, { limit: 5 }),
-        api.listAgents(org.id),
-        api.getUsage(org.id),
-      ])
-      .then(([callsData, leadsData, agents, usageData]) => {
-      setUsage(usageData);
-      setCalls(callsData);
-      setLeads(leadsData);
-      setAgent(agents[0] ?? null);
-      })
-      .catch(() => {
-        // Non-fatal for the overview — empty state below covers this.
-      })
-      .finally(() => setDataLoading(false));
-  }, [org]);
+  const summary = useLoad(orgId ? `${orgId}:${range}` : null, () => api.getDashboardSummary(orgId!, range, browserTimeZone()), "We couldn't load your activity.");
+  const calls = useLoad(orgId ?? null, () => api.listCalls(orgId!, { limit: 5 }), "We couldn't load your recent calls.");
+  const credits = useLoad(orgId ?? null, () => api.getCredits(orgId!), "We couldn't load your credits.");
 
   if (loading) return <LoadingScreen />;
   if (error) return <ErrorScreen message={error} />;
 
+  const compareTo = RANGES.find((r) => r.id === range)!.compareTo;
+  const awaiting = summary.last; // the follow-up queue doesn't depend on the range
+  const items = attentionItems({
+    status: shell.status,
+    sub: shell.sub,
+    agent: shell.agent,
+    phone: shell.phone,
+    credits: credits.data,
+    awaitingLeads: awaiting?.leads_awaiting_follow_up ?? 0,
+    oldestAwaitingAt: awaiting?.oldest_unattended_lead_at ?? null,
+  });
+  const attentionReady = !shell.loading && (awaiting !== null || summary.error !== null);
+
+  const data = summary.data;
+  const labelFor = data?.granularity === "hour" ? hourLabel : dayLabel;
+  const rangeText = range === "today" ? "today" : range === "7d" ? "in the last 7 days" : "in the last 30 days";
+
   return (
     <DashboardShell org={org}>
-      <h1 className="font-[family-name:var(--font-display)] text-[24px] font-bold tracking-tight">Overview</h1>
-      <p className="mt-1 text-[14.5px] text-[var(--color-ink-soft)]">
-          {org?.name} · {dataLoading ? "loading…" : `${calls.length} recent calls, ${leads.length} recent leads`}
-      </p>
-
-    {org && <CreditsPanel orgId={org.id} isOwner={org.role === "owner"} />}
-{org && <AnalyticsPanel orgId={org.id} />}
-
-{!dataLoading && agent && agent.status !== "active" && (
-     <div className="mt-6 rounded-2xl border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-6">
-     <div className="text-[12.5px] font-medium uppercase tracking-wide text-[var(--color-ink-soft)]">
-          Not live yet
-    </div>
-     <h2 className="mt-1 font-[family-name:var(--font-display)] text-[20px] font-bold tracking-tight">
-          Your receptionist is built and ready
-     </h2>
-     <p className="mt-1.5 max-w-lg text-[14px] text-[var(--color-ink-soft)]">
-         It isn&apos;t answering real calls yet. Talk to it as much as you like, then put it on your business number
-         when you&apos;re ready.
-     </p>
-     <div className="mt-4 flex flex-wrap gap-3">
-     <Link
-         href="/dashboard/go-live"
-         className="rounded-full bg-[var(--color-ink)] px-5 py-2.5 text-[13.5px] font-medium text-[var(--color-paper)]"
-       >
-          Put it on my business number
-       </Link>
-       <Link
-        href="/dashboard/test"
-        className="flex items-center gap-1.5 rounded-full border border-[var(--color-line)] px-5 py-2.5 text-[13.5px] font-medium"
-       >
-        <Mic className="h-3.5 w-3.5" /> Talk to it again
-      </Link>
-    </div>
-  </div>
-)}
-
-{!dataLoading && agent && agent.status === "active" && (
-  <div className="mt-6 flex items-center gap-2 rounded-xl border border-[var(--color-ok)]/30 bg-[var(--color-ok)]/10 px-4 py-3 text-[14px] font-medium">
-    <span className="h-2 w-2 rounded-full bg-[var(--color-ok)]" />
-    Your receptionist is live and answering calls
-  </div>
-)}
-
-{!dataLoading && agent && usage && (
-        <p className="mt-4 text-[13.5px] text-[var(--color-ink-soft)]">
-          {usage.period_start ? "This billing period" : "So far"}: {usage.calls_count} {usage.calls_count === 1 ? "call" : "calls"} handled ·{" "}
-          {Math.round(usage.billable_seconds / 60)} min
-        </p>
-      )}
-
-      {!dataLoading && !agent && calls.length === 0 && leads.length === 0 && (
-        <div className="mt-10 flex flex-col items-center rounded-2xl border border-dashed border-[var(--color-line)] px-6 py-16 text-center">
-          <PhoneCall className="h-8 w-8 text-[var(--color-ink-soft)]" strokeWidth={1.5} />
-          <h2 className="mt-4 text-[16px] font-semibold">Set up your receptionist to get started.</h2>
-          <p className="mt-1.5 max-w-xs text-[14px] text-[var(--color-ink-soft)]">
-            Once your receptionist is active and takes its first call, it&apos;ll show up here.
-          </p>
-          <Link
-            href="/onboarding"
-            className="mt-5 flex items-center gap-1.5 rounded-full bg-[var(--color-ink)] px-5 py-2.5 text-[13.5px] font-medium text-[var(--color-paper)]"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            Set up your receptionist
-          </Link>
+      <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+        <div className="min-w-0">
+          <h1 className="font-[family-name:var(--font-display)] text-[24px] font-bold tracking-tight">Overview</h1>
+          <p className="mt-1 truncate text-[14.5px] text-[var(--color-ink-soft)]">{org?.name}</p>
         </div>
-      )}
+        <RangeTabs value={range} onChange={setRange} />
+      </div>
 
-      {!dataLoading && (calls.length > 0 || leads.length > 0) && (
-        <div className="mt-8 grid gap-6 md:grid-cols-2">
-          <div className="min-w-0">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-[15px] font-semibold">Recent calls</h2>
-              <Link href="/dashboard/calls" className="text-[13px] text-[var(--color-ink-soft)] hover:text-[var(--color-ink)]">
-                View all →
-              </Link>
-            </div>
-            <div className="space-y-2">
-              {calls.map((c) => (
-                <div key={c.id} className="rounded-lg border border-[var(--color-line)] bg-[var(--color-paper-raised)] px-4 py-3">
-                  <div className="flex items-center justify-between text-[13.5px]">
-                    <span className="font-medium">
-                         {c.direction === "test" ? "Test call" : c.caller_number || "Unknown caller"}
-                    </span>
-                    <span className="text-[var(--color-ink-soft)]">{c.status || "—"}</span>
-                  </div>
-                  {c.summary && <p className="mt-1 truncate text-[13px] text-[var(--color-ink-soft)]">{c.summary}</p>}
-                </div>
-              ))}
-            </div>
-          </div>
+      <div className="mt-6 space-y-3">
+        <StatusCards
+          loading={shell.loading}
+          status={shell.status}
+          agent={shell.agent}
+          agentKnown={shell.agentKnown}
+          phone={shell.phone}
+          phoneKnown={shell.phoneKnown}
+          sub={shell.sub}
+        />
+        <AttentionList items={items} ready={attentionReady} />
+      </div>
 
-          <div className="min-w-0">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-[15px] font-semibold">Recent leads</h2>
-              <Link href="/dashboard/leads" className="text-[13px] text-[var(--color-ink-soft)] hover:text-[var(--color-ink)]">
-                View all →
-              </Link>
+      <h2 className="mt-8 text-[15px] font-semibold">Activity</h2>
+      <div className="mt-3 space-y-3">
+        <MetricCards summary={data} loading={summary.loading} error={summary.error} compareTo={compareTo} onRetry={summary.retry} />
+
+        <section className="min-w-0 rounded-2xl border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-4 sm:p-5" aria-label="Call activity">
+          {data ? (
+            <div className="grid gap-5 sm:grid-cols-2">
+              <UsageChart
+                title={data.granularity === "hour" ? "Calls by hour" : "Calls by day"}
+                points={data.series.map((b) => ({ date: b.start, calls: b.calls, credit_seconds: b.call_seconds }))}
+                pick={(p) => p.calls}
+                format={String}
+                emptyText={`No calls ${rangeText} yet.`}
+                labelFor={labelFor}
+              />
+              <UsageChart
+                title="Time on calls"
+                points={data.series.map((b) => ({ date: b.start, calls: b.calls, credit_seconds: b.call_seconds }))}
+                pick={(p) => p.credit_seconds}
+                format={minutesLabel}
+                emptyText={`No call time ${rangeText} yet.`}
+                labelFor={labelFor}
+              />
             </div>
-            <div className="space-y-2">
-              {leads.map((l) => (
-                <div key={l.id} className="rounded-lg border border-[var(--color-line)] bg-[var(--color-paper-raised)] px-4 py-3">
-                  <div className="flex items-center justify-between text-[13.5px]">
-                    <span className="font-medium">{l.name || "Unnamed lead"}</span>
-                    <span className="text-[var(--color-ink-soft)]">{l.status}</span>
-                  </div>
-                  {l.reason && <p className="mt-1 truncate text-[13px] text-[var(--color-ink-soft)]">{l.reason}</p>}
-                </div>
-              ))}
+          ) : (
+            <div className="grid gap-5 sm:grid-cols-2" aria-busy={summary.loading}>
+              <div className="h-[110px] animate-pulse rounded-lg bg-[var(--color-line)]/60" />
+              <div className="hidden h-[110px] animate-pulse rounded-lg bg-[var(--color-line)]/60 sm:block" />
             </div>
-          </div>
-        </div>
-      )}
+          )}
+        </section>
+      </div>
+
+      <div className="mt-6 grid gap-3 md:grid-cols-2">
+        <RecentCalls calls={calls.data} loading={calls.loading} error={calls.error} onRetry={calls.retry} />
+        <WaitingLeads
+          leads={awaiting?.awaiting_leads ?? null}
+          count={awaiting?.leads_awaiting_follow_up ?? 0}
+          loading={summary.last === null && summary.loading}
+          error={summary.last === null ? summary.error : null}
+          onRetry={summary.retry}
+        />
+      </div>
+
+      <div id="credits" className="scroll-mt-20">
+        {org && <CreditsPanel orgId={org.id} isOwner={org.role === "owner"} showUsage={false} />}
+      </div>
+      {org && <AnalyticsPanel orgId={org.id} />}
     </DashboardShell>
   );
 }
