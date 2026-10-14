@@ -329,6 +329,21 @@ export interface CallOut {
   sentiment: string | null;
 }
 
+export interface CallRow extends CallOut {
+  lead_id: string | null;
+  lead_name: string | null;
+  lead_status: string | null;
+}
+
+export interface CallPage {
+  items: CallRow[];
+  total: number; // calls matching the filters
+  total_seconds: number; // time on those calls
+  leads_captured: number; // of those calls, how many produced a lead
+  limit: number;
+  offset: number;
+}
+
 export interface LeadOut {
   id: string;
   name: string | null;
@@ -646,11 +661,13 @@ export const api = {
     );
   },
 
+  browseCalls: (orgId: string, params: Record<string, string>) =>
+    request<CallPage>(`/api/v1/orgs/${orgId}/calls/browse?${new URLSearchParams(params)}`),
   getCall: (
     orgId: string,
     callId: string,
   ) =>
-    request<CallOut>(
+    request<CallRow>(
       `/api/v1/orgs/${orgId}/calls/${callId}`,
     ),
 
