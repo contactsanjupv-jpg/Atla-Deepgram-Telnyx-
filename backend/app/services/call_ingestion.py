@@ -24,7 +24,7 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.models.billing import UsageLedgerEntry
+from app.db.models.billing import FreeTestAllowance, UsageLedgerEntry
 from app.db.models.calls import Call, CallDirection, CallTranscript
 from app.db.models.crm import Lead
 from app.db.models.platform import WebhookEvent
@@ -224,9 +224,13 @@ def _upsert_usage(db: Session, call: Call, pcall: dict) -> None:
         subscribed = sub is not None and sub.status in ACTIVE_STATUSES
         if call.direction != CallDirection.test:
             kind = "production"
+        elif db.query(FreeTestAllowance.id).filter(FreeTestAllowance.retell_call_id == call.retell_call_id).first() is not None:
+            # Classified when the call was ADMITTED: it consumed the free allowance, so it stays free (recorded with
+            # its real cost, never charged) even if its webhook arrives late, after the customer has subscribed.
+            kind = "free_test"
         else:
-            # A test call while subscribed spends credits like any call; before that it is the one
-            # promised free call: recorded (with its real cost) but never charged.
+            # Not admitted through the free flow: a test call while subscribed spends credits like any call;
+            # without a subscription it falls back to the free classification as before.
             kind = "test" if subscribed else "free_test"
         try:
             with db.begin_nested():
