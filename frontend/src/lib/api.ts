@@ -362,6 +362,21 @@ export interface LeadOut {
   source: string;
   created_at: string;
 }
+/** A lead plus the call it came from, when it came from one. Every field is a stored value. */
+export interface LeadRow extends LeadOut {
+  call_id: string | null;
+  call_started_at: string | null;
+  call_direction: string | null;
+  call_duration_seconds: number | null;
+}
+
+export interface LeadPage {
+  items: LeadRow[];
+  total: number; // leads matching the search and status
+  counts: Record<string, number>; // per status, for the search (ignores the status filter)
+  limit: number;
+  offset: number;
+}
 
 export const api = {
   signup: (
@@ -701,7 +716,9 @@ export const api = {
       `/api/v1/orgs/${orgId}/leads${qs ? `?${qs}` : ""}`,
     );
   },
-
+  
+  browseLeads: (orgId: string, params: Record<string, string>) =>
+    request<LeadPage>(`/api/v1/orgs/${orgId}/leads/browse?${new URLSearchParams(params)}`),
   updateLeadStatus: (
     orgId: string,
     leadId: string,
