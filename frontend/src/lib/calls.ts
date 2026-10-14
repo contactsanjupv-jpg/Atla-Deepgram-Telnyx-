@@ -151,6 +151,12 @@ export function callerLabel(c: Pick<CallRow, "direction" | "caller_number">): st
   return c.caller_number ? formatPhone(c.caller_number) : "Unknown caller";
 }
 
+/** The number the call came from, as stored. Browser test calls have none, and we say so instead of guessing. */
+export function phoneLabel(c: Pick<CallRow, "direction" | "caller_number">): string {
+  if (c.caller_number) return formatPhone(c.caller_number);
+  return c.direction === "test" ? "None (browser test call)" : "Not available";
+}
+
 export const DIRECTION_LABEL: Record<string, string> = { inbound: "Inbound", outbound: "Outbound", test: "Test (browser)" };
 
 // Retell's documented disconnection reasons, in plain words. Anything not listed is shown humanized, never hidden.

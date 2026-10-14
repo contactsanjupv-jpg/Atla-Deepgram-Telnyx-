@@ -334,6 +334,13 @@ export interface CallRow extends CallOut {
   lead_name: string | null;
   lead_status: string | null;
 }
+/** One call with the lead it produced. The lead's details are lead information, never a caller identity. */
+export interface CallDetail extends CallRow {
+  lead_phone: string | null;
+  lead_email: string | null;
+  lead_reason: string | null;
+  lead_summary: string | null;
+}
 
 export interface CallPage {
   items: CallRow[];
@@ -667,7 +674,7 @@ export const api = {
     orgId: string,
     callId: string,
   ) =>
-    request<CallRow>(
+    request<CallDetail>(
       `/api/v1/orgs/${orgId}/calls/${callId}`,
     ),
 

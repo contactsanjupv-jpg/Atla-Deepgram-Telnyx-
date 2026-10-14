@@ -3,8 +3,9 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { X } from "lucide-react";
-import { api, describeError, type CallRow } from "@/lib/api";
-import { DIRECTION_LABEL, callerLabel, endedBecause, formatCallTime, formatDuration, LEAD_STATUS_LABEL, sentimentView } from "@/lib/calls";
+import { api, describeError, type CallDetail, type CallRow } from "@/lib/api";
+import { formatPhone } from "@/lib/receptionistStatus";
+import { DIRECTION_LABEL, callerLabel, endedBecause, formatCallTime, formatDuration, LEAD_STATUS_LABEL, phoneLabel, sentimentView } from "@/lib/calls";
 import { CallStatusBadge, SentimentBadge } from "./CallBadges";
 import { TranscriptBody } from "./TranscriptDialog";
 
@@ -38,10 +39,10 @@ export function CallDetailDialog({
   planKnown: boolean;
   onClose: () => void;
 }) {
-  const [loaded, setLoaded] = useState<{ id: string; call: CallRow | null; error: string | null } | null>(null);
+  const [loaded, setLoaded] = useState<{ id: string; call: CallDetail | null; error: string | null } | null>(null);
 
   useEffect(() => {
-    if (initial?.id === callId) return;
+    // Always load the full record: the list row has no lead contact details.
     let live = true;
     api
       .getCall(orgId, callId)
@@ -50,7 +51,7 @@ export function CallDetailDialog({
     return () => {
       live = false;
     };
-  }, [orgId, callId, initial]);
+  }, [orgId, callId]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -64,7 +65,8 @@ export function CallDetailDialog({
   }, [onClose]);
 
   const fetched = loaded && loaded.id === callId ? loaded : null;
-  const call = initial?.id === callId ? initial : (fetched?.call ?? null);
+  const detail = fetched?.call ?? null;
+  const call: CallRow | null = detail ?? (initial?.id === callId ? initial : null);
   const end = call ? endedBecause(call.disconnect_reason) : null;
 
   return (
@@ -83,7 +85,7 @@ export function CallDetailDialog({
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {!call && !fetched && <p className="text-[13.5px] text-[var(--color-ink-soft)]">Loading…</p>}
-          {!call && fetched?.error && <p className="text-[13.5px] text-[#7a2416]">{fetched.error}</p>}
+          {fetched?.error && !detail && !call && <p className="text-[13.5px] text-[#7a2416]">{fetched.error}</p>}
           {call && (
             <>
               <dl className="grid grid-cols-2 gap-x-4 gap-y-3.5">
@@ -91,7 +93,8 @@ export function CallDetailDialog({
                   <CallStatusBadge call={call} />
                 </Fact>
                 <Fact label="Length">{formatDuration(call.duration_seconds)}</Fact>
-                <Fact label="Type">{DIRECTION_LABEL[call.direction] ?? call.direction}</Fact>
+                <Fact label="Phone number">{phoneLabel(call)}</Fact>
+                <Fact label="Direction">{DIRECTION_LABEL[call.direction] ?? call.direction}</Fact>
                 <Fact label="Caller mood">{sentimentView(call.sentiment) ? <SentimentBadge sentiment={call.sentiment} /> : "—"}</Fact>
                 <Fact label="Started">{formatCallTime(call.started_at, tz) ?? "—"}</Fact>
                 <Fact label="Ended">{formatCallTime(call.ended_at, tz) ?? "—"}</Fact>
@@ -101,14 +104,31 @@ export function CallDetailDialog({
               <h3 className="mt-6 text-[13.5px] font-semibold">Summary</h3>
               <p className="mt-1.5 break-words text-[13.5px] text-[var(--color-ink-soft)]">{call.summary || "No summary was recorded for this call."}</p>
 
-              <h3 className="mt-6 text-[13.5px] font-semibold">Lead</h3>
+              <h3 className="mt-6 text-[13.5px] font-semibold">Lead details</h3>
               {call.lead_id ? (
-                <p className="mt-1.5 text-[13.5px]">
-                  {call.lead_name || "Unnamed lead"} · {LEAD_STATUS_LABEL[call.lead_status ?? ""] ?? call.lead_status}{" "}
-                  <Link href="/dashboard/leads" className="font-medium underline underline-offset-2">
+                <>
+                  <p className="mt-1 text-[12px] text-[var(--color-ink-soft)]">What was captured on this call. It may not match the number the caller phoned from.</p>
+                  <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-3">
+                    <Fact label="Name">{call.lead_name || "Not given"}</Fact>
+                    <Fact label="Status">{LEAD_STATUS_LABEL[call.lead_status ?? ""] ?? call.lead_status}</Fact>
+                    {!detail && <p className="col-span-2 text-[12.5px] text-[var(--color-ink-soft)]">Loading the rest…</p>}
+                    {detail?.lead_phone && <Fact label="Phone">{formatPhone(detail.lead_phone)}</Fact>}
+                    {detail?.lead_email && <Fact label="Email">{detail.lead_email}</Fact>}
+                    {detail?.lead_reason && (
+                      <div className="col-span-2">
+                        <Fact label="Reason for calling">{detail.lead_reason}</Fact>
+                      </div>
+                    )}
+                    {detail?.lead_summary && (
+                      <div className="col-span-2">
+                        <Fact label="Notes">{detail.lead_summary}</Fact>
+                      </div>
+                    )}
+                  </dl>
+                  <Link href="/dashboard/leads" className="mt-3 inline-block text-[13px] font-medium underline underline-offset-2">
                     Open leads
                   </Link>
-                </p>
+                </>
               ) : (
                 <p className="mt-1.5 text-[13.5px] text-[var(--color-ink-soft)]">This call didn&apos;t produce a lead.</p>
               )}
@@ -118,7 +138,13 @@ export function CallDetailDialog({
                 {canReadConversation ? (
                   <TranscriptBody orgId={orgId} callId={call.id} />
                 ) : planKnown ? (
-                  <p className="text-[13.5px] text-[var(--color-ink-soft)]">The full conversation, with who said what and when, is part of the Growth plan. The summary above is included on every plan.</p>
+                  <div className="rounded-xl border border-[var(--color-line)] p-4 text-[13.5px]">
+                    <p className="font-medium">The full transcript is part of the Growth plan</p>
+                    <p className="mt-1 text-[var(--color-ink-soft)]">With Growth you can read every call word for word, with who said what and when. The summary above stays available on every plan.</p>
+                    <Link href="/dashboard/settings" className="mt-2 inline-block font-medium underline underline-offset-2">
+                      See plans
+                    </Link>
+                  </div>
                 ) : (
                   <p className="text-[13.5px] text-[var(--color-ink-soft)]">Loading…</p>
                 )}

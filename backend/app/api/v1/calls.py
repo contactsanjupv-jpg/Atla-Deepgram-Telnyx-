@@ -139,21 +139,38 @@ def search_calls(
     return transcripts.search_transcripts(db, membership.organization_id, q, limit)
 
 
-@router.get("/{call_id}", response_model=CallRow)
+class CallDetail(CallRow):
+    """One call with the details of the lead it produced. Never carries the transcript (that is Growth-only, below)."""
+
+    lead_phone: str | None = None
+    lead_email: str | None = None
+    lead_reason: str | None = None
+    lead_summary: str | None = None
+
+
+@router.get("/{call_id}", response_model=CallDetail)
 def get_call(
     call_id: uuid.UUID,
     membership: OrganizationMember = Depends(current_membership),
     db: Session = Depends(get_db),
 ):
     row = (
-        db.query(Call, Lead.id, Lead.name, Lead.status)
+        db.query(Call, Lead)
         .outerjoin(Lead, (Lead.call_id == Call.id) & (Lead.organization_id == Call.organization_id))
         .filter(Call.id == call_id, Call.organization_id == membership.organization_id)
         .first()
     )
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Call not found")
-    return _row(*row)
+    call, lead = row
+    base = _row(call, lead.id if lead else None, lead.name if lead else None, lead.status if lead else None)
+    return CallDetail(
+        **base.model_dump(),
+        lead_phone=lead.phone if lead else None,
+        lead_email=lead.email if lead else None,
+        lead_reason=lead.reason if lead else None,
+        lead_summary=lead.summary if lead else None,
+    )
 
 
 @router.get("/{call_id}/transcript")

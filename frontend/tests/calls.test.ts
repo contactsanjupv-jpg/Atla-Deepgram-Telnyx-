@@ -15,6 +15,7 @@ import {
   formatTotalTime,
   localDate,
   pageInfo,
+  phoneLabel,
   presetRange,
   searchTerm,
   sentimentView,
@@ -166,4 +167,10 @@ test("sentimentView stays silent when unknown", () => {
   assert.deepEqual(sentimentView("Neutral"), { label: "Neutral", tone: "neutral" });
   assert.equal(sentimentView("Unknown"), null);
   assert.equal(sentimentView(null), null);
+});
+
+test("phoneLabel shows the stored number and never invents one", () => {
+  assert.equal(phoneLabel({ direction: "inbound", caller_number: "+13055551234" }), "(305) 555-1234");
+  assert.equal(phoneLabel({ direction: "inbound", caller_number: null }), "Not available");
+  assert.equal(phoneLabel({ direction: "test", caller_number: null }), "None (browser test call)");
 });
