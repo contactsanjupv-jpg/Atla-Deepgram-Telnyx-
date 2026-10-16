@@ -222,10 +222,14 @@ def test_a_provider_failure_deletes_nothing_and_a_retry_completes(providers):
     assert _rows(org, "subscriptions") == 0
 
 
-def test_a_paddle_4xx_on_cancel_is_treated_as_already_cancelled(providers):
+def test_a_paddle_4xx_on_cancel_is_never_assumed_to_mean_already_cancelled(providers):
+    """Replaces the old test that asserted the unsafe assumption. Paddle's own record must say "canceled"
+    (see tests/test_account_deletion_billing_safety.py); here the provider cannot confirm it, so nothing is deleted."""
     c, org, email, name, agent, cid = _fully_populated_org()
-    providers.billing.fail = PaddleAPIError("already cancelled", 409)
-    assert _delete(c, org, name).status_code == 204
+    providers.billing.fail = PaddleAPIError("Paddle returned 401", 401)
+    resp = _delete(c, org, name)
+    assert resp.status_code == 502 and "nothing was deleted" in resp.json()["detail"]
+    assert _rows(org, "calls") == 1 and _rows(org, "subscriptions") == 1 and providers.phones.releases == []
 
 
 def test_other_accounts_cannot_delete_mine(providers):

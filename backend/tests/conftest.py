@@ -80,3 +80,11 @@ def _guard_never_calls_real_paddle(monkeypatch):
     RecordingBillingProvider.fail = False
     monkeypatch.setattr(duplicate_subscriptions, "PaddleBillingProvider", RecordingBillingProvider)
     yield RecordingBillingProvider
+
+@pytest.fixture(autouse=True)
+def _auto_provisioning_off_by_default(monkeypatch):
+    """Existing tests must never reach the real Retell. test_auto_provisioning.py switches it on with a fake."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "AUTO_PROVISION_NUMBERS", False)
+    yield

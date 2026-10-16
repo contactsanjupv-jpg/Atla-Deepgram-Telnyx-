@@ -107,11 +107,36 @@ def cancel_subscription(
     if sub.cancel_effective_at is not None:
         return {"status": "already_scheduled"}
     try:
-        PaddleBillingProvider().cancel_subscription(sub.external_subscription_id, immediately=False)
+        provider = PaddleBillingProvider()
+        try:
+            provider.cancel_subscription(sub.external_subscription_id, immediately=False)
+        except RuntimeError as e:
+            # The request may have reached Paddle even though we saw an error (lost response / timeout), or a
+            # retry may be refused because it is already scheduled. Only Paddle's own record can say which.
+            if not _cancellation_in_effect(provider, sub.external_subscription_id):
+                raise
+            logger.warning("Cancel call failed (%s) but Paddle reports the cancellation is in effect", e)
+            return {"status": "already_scheduled"}
     except RuntimeError as e:
         logger.error("Cancel failed: %s", e)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "We couldn't cancel right now. Please try again.") from e
     return {"status": "requested"}
+
+
+def _cancellation_in_effect(provider, external_subscription_id: str) -> bool:
+    """True only if Paddle's own subscription record shows it canceled or with a scheduled cancel.
+    A missing record, any other state, or a failed lookup is "not confirmed"."""
+    lookup = getattr(provider, "get_subscription", None)
+    if lookup is None:
+        return False
+    try:
+        remote = lookup(external_subscription_id)
+    except RuntimeError:
+        return False
+    if not isinstance(remote, dict):
+        return False
+    scheduled = remote.get("scheduled_change")
+    return remote.get("status") == "canceled" or (isinstance(scheduled, dict) and scheduled.get("action") == "cancel")
 
 
 @router.get("/manage", response_model=ManageOut)

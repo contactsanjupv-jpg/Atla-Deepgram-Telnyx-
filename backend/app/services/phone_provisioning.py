@@ -39,6 +39,14 @@ class ProvisioningFailed(Exception):
     pass
 
 
+class ProvisioningPaymentRequired(ProvisioningFailed):
+    """The provider refused the purchase for lack of payment (HTTP 402). Nothing was bought; recoverable once
+    the PROVIDER account is funded. (That Retell uses 402 for this is UNVERIFIED - see retell_phone_provider.py.)"""
+
+
+PAYMENT_REQUIRED = 402
+
+
 def _nickname(org_id: uuid.UUID, generation: int) -> str:
     return f"atla-{org_id}-{generation}"
 
@@ -114,10 +122,11 @@ def provision_number(
                     db.commit()
                     logger.error("Ambiguous number purchase [org=%s]: %s", org_id, e)
                     raise ProvisioningPending() from e
-                prov.status = "failed"
+                blocked = e.status_code == PAYMENT_REQUIRED
+                prov.status = "blocked_payment" if blocked else "failed"
                 db.commit()
-                logger.error("Number purchase failed [org=%s]: status=%s body=%s", org_id, e.status_code, e.body)
-                raise ProvisioningFailed() from e
+                logger.error("Number purchase failed [org=%s]: status=%s body=%s error=%s", org_id, e.status_code, e.body, e)
+                raise (ProvisioningPaymentRequired() if blocked else ProvisioningFailed()) from e
             return _adopt(db, prov, pn)
     except LockNotAcquired as e:
         raise ProvisioningInProgress() from e

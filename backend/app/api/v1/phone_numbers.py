@@ -14,6 +14,7 @@ from app.db.models.tenancy import OrganizationMember, OrgRole
 from app.providers.phone.retell_phone_provider import RetellPhoneProvider
 from app.providers.retell_client import RetellAPIError
 from app.schemas.catalog import PhoneNumberOut, PurchaseNumberRequest
+from app.services.auto_provisioning import provisioning_state
 from app.services.phone_provisioning import (
     ProvisioningFailed,
     ProvisioningInProgress,
@@ -26,6 +27,15 @@ logger = logging.getLogger("atla.phone_numbers")
 
 router = APIRouter(prefix="/api/v1/orgs/{organization_id}/phone-numbers", tags=["phone-numbers"])
 settings = get_settings()
+
+
+@router.get("/provisioning")
+def get_provisioning_state(
+    membership: OrganizationMember = Depends(current_membership),
+    db: Session = Depends(get_db),
+):
+    """none | provisioning | ready | blocked, with an honest message. Never says the receptionist is live."""
+    return provisioning_state(db, membership.organization_id)
 
 
 @router.get("", response_model=list[PhoneNumberOut])

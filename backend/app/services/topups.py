@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db.models.billing import TopupPurchase
+from app.db.models.billing import CreditLedgerEntry, TopupPurchase
 from app.providers.billing.paddle_billing_provider import PaddleBillingProvider
 from app.services.credits import add_ledger_entry, lock_org_credits
 
@@ -203,23 +203,38 @@ def apply_adjustment(db: Session, adj: dict) -> bool:
         _grant(db, row, txn_id)
     lock_org_credits(db, row.organization_id)
 
+    # Idempotency FIRST, before anything is read-modified-written: an adjustment already processed (webhook
+    # redelivery, reconciler replay, a concurrent duplicate that waited on the lock above) changes nothing.
+    if db.query(CreditLedgerEntry.id).filter(CreditLedgerEntry.idempotency_key == f"{action}:{adj_id}").first() is not None:
+        return False
+
     if action == "refund":
         try:
             refunded = int(((adj.get("totals") or {}).get("subtotal")))
         except (TypeError, ValueError):
             logger.error("Refund %s has no usable subtotal — flagged for manual review", adj_id)
             return False
-        row.refunded_minor = min(row.amount_minor, row.refunded_minor + refunded)
-        target = row.credit_seconds * row.refunded_minor // row.amount_minor
-        delta = target - row.clawed_back_seconds
-        applied = delta > 0 and add_ledger_entry(
+        if refunded <= 0:
+            logger.error("Refund %s has a non-positive subtotal — ignored", adj_id)
+            return False
+        # Compute from the CURRENT row without mutating it, record the adjustment in the ledger, and only if that
+        # insert is the one that won (unique idempotency key) update the row. Same transaction, so all or nothing.
+        new_refunded = min(row.amount_minor, row.refunded_minor + refunded)
+        target = row.credit_seconds * new_refunded // row.amount_minor
+        delta = max(0, target - row.clawed_back_seconds)
+        # A refund that removes no credits (already clawed back) still gets a zero-second ledger row, so that
+        # replaying it cannot count the money twice.
+        recorded = add_ledger_entry(
             db, organization_id=row.organization_id, kind="refund", seconds=-delta,
             idempotency_key=f"refund:{adj_id}", reference=adj_id, note=f"Refund ${refunded / 100:,.2f}",
         )
-        if applied:
+        if not recorded:
+            return False
+        row.refunded_minor = new_refunded
+        if delta > 0:
             row.clawed_back_seconds += delta
             row.status = "refunded" if row.refunded_minor >= row.amount_minor else "partially_refunded"
-        return bool(applied)
+        return delta > 0
 
     if action == "chargeback":
         remaining = row.credit_seconds - row.clawed_back_seconds

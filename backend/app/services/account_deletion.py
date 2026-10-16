@@ -39,6 +39,19 @@ def _ignore_missing(fn, *args) -> None:
             raise
 
 
+def _provider_says_canceled(billing: BillingProvider, external_subscription_id: str) -> bool:
+    """True ONLY if the billing provider's own record of this subscription says it is canceled.
+    A missing record (None), any other status, an error, or a provider that cannot look it up all mean "not verified"."""
+    lookup = getattr(billing, "get_subscription", None)
+    if lookup is None:
+        return False
+    try:
+        remote = lookup(external_subscription_id)
+    except RuntimeError:  # PaddleAPIError (auth, 4xx, 5xx, network) and NotImplementedError are both RuntimeErrors
+        return False
+    return isinstance(remote, dict) and remote.get("status") == "canceled"
+
+
 def delete_organization(
     db: Session,
     org_id: uuid.UUID,
@@ -54,15 +67,20 @@ def delete_organization(
         ).all()
         if subs:
             billing = billing or PaddleBillingProvider()
-            for sub in subs:
+            unverified: list[str] = []
+            for sub in subs:  # try every subscription so as many as possible stop billing, then decide
                 try:
                     billing.cancel_subscription(sub.external_subscription_id, immediately=True)
                 except PaddleAPIError as e:
-                    # 4xx on a retry usually means "already cancelled" (UNVERIFIED which code Paddle uses);
-                    # network/5xx must stop us: we may still be billing them.
-                    if not 400 <= e.status_code < 500:
-                        raise
-                    logger.warning("Paddle refused cancel for %s (%s); assuming already cancelled", sub.external_subscription_id, e.status_code)
+                    # No error code proves anything (401/403 = bad key, 404 = maybe the wrong environment,
+                    # 4xx/5xx/network = unknown). Only Paddle itself saying "canceled" lets us continue.
+                    if _provider_says_canceled(billing, sub.external_subscription_id):
+                        logger.warning("Cancel refused for %s (%s) but Paddle reports it canceled", sub.external_subscription_id, e.status_code)
+                        continue
+                    logger.error("Cannot confirm %s is canceled (cancel returned %s)", sub.external_subscription_id, e.status_code)
+                    unverified.append(sub.external_subscription_id)
+            if unverified:
+                raise PaddleAPIError(f"Could not confirm cancellation of {len(unverified)} subscription(s)")
 
         phone_rows = db.query(PhoneNumber).filter(
             PhoneNumber.organization_id == org_id, PhoneNumber.status != PhoneNumberStatus.released

@@ -10,6 +10,7 @@ to repeat.
     done the work), so we raise RetellAPIError(ambiguous=True) and let the
     caller reconcile instead of blindly repeating a purchase.
 """
+import re
 import time
 
 import httpx
@@ -18,6 +19,17 @@ from app.config import get_settings
 
 _MAX_ATTEMPTS = 3
 _SAFE_TO_REPEAT_METHODS = {"GET", "DELETE"}
+
+
+def _safe_reason(exc: Exception, api_key: str | None = None) -> str:
+    """Exception class + short message for LOGS: enough to tell DNS / TLS / refused / timeout / proxy apart.
+    The key is never part of an httpx transport message (it only travels in a header), but it is stripped
+    anyway, along with any bearer token, and the text is capped."""
+    text = " ".join(str(exc).split())
+    if api_key:
+        text = text.replace(api_key, "[redacted]")
+    text = re.sub(r"(?i)bearer\s+\S+", "Bearer [redacted]", text)[:200]
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 class RetellAPIError(Exception):
@@ -57,14 +69,16 @@ class RetellClient:
                 if attempt < _MAX_ATTEMPTS - 1:
                     time.sleep(0.5 * (2**attempt))
                     continue
-                raise RetellAPIError(0, "Could not connect to Retell", ambiguous=False) from e
+                raise RetellAPIError(0, f"Could not connect to Retell ({_safe_reason(e, self.api_key)})", ambiguous=False) from e
             except httpx.TransportError as e:
                 # Sent, but we never saw a response: Retell may have acted on it.
                 last_error = e
                 if method in _SAFE_TO_REPEAT_METHODS and attempt < _MAX_ATTEMPTS - 1:
                     time.sleep(0.5 * (2**attempt))
                     continue
-                raise RetellAPIError(0, "No response from Retell", ambiguous=method not in _SAFE_TO_REPEAT_METHODS) from e
+                raise RetellAPIError(
+                    0, f"No response from Retell ({_safe_reason(e, self.api_key)})", ambiguous=method not in _SAFE_TO_REPEAT_METHODS
+                ) from e
 
             if resp.status_code >= 400:
                 try:

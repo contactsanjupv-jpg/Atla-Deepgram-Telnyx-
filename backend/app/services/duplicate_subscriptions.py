@@ -75,6 +75,7 @@ def schedule_duplicate_cancellations(db: Session, organization_id: uuid.UUID, pr
 def after_subscription_applied(db: Session, data: dict) -> None:
     """Run AFTER the webhook transaction committed. Never raises: a billing-side-effect
     problem must not turn a correctly stored event into a webhook failure."""
+    sub = None
     try:
         external_id = data.get("id")
         sub = (
@@ -88,3 +89,11 @@ def after_subscription_applied(db: Session, data: dict) -> None:
         schedule_duplicate_cancellations(db, sub.organization_id)
     except Exception:  # noqa: BLE001
         logger.exception("Post-webhook duplicate-subscription check failed")
+    try:
+        from app.services.auto_provisioning import auto_provision_for_org  # local import: avoids a cycle
+
+        if sub is not None and sub.status == "active":
+            auto_provision_for_org(db, sub.organization_id)
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.exception("Post-webhook number provisioning failed")

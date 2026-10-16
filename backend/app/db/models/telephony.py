@@ -41,7 +41,7 @@ class PhoneProvisioning(Base, UUIDPKMixin, TimestampMixin):
     provider. One row per org (unique) => at most one number per org. The
     deterministic `nickname` is stored on the provider resource, so an ambiguous
     purchase can be reconciled by asking the provider whether it exists.
-    status: requested | purchasing | ambiguous | purchased | failed | released
+    status: requested | purchasing | ambiguous | purchased | failed | blocked_payment | released
     """
 
     __tablename__ = "phone_provisionings"

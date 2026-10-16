@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models.billing import Subscription
 from app.services.billing_state import ACTIVE_STATUSES
-from app.services.credits import ensure_plan_grant
+from app.services.credits import ensure_plan_grant, period_grant_deficit_seconds
 from app.services.duplicate_subscriptions import schedule_duplicate_cancellations
 from app.services.plans import plan_id_from_items
 from app.services.subscription_sync import parse_dt, sync_subscription
@@ -78,27 +78,20 @@ def _differences(local: Subscription, remote: dict) -> dict[str, tuple]:
     return diffs
 
 
-def _ensure_grants(db: Session, report: ReconcileReport, apply: bool) -> None:
-    """Every active subscription must hold its included credits for the CURRENT period (one grant, idempotent)."""
+def _ensure_grants(db: Session, report: ReconcileReport, apply: bool, organization_ids: set[uuid.UUID] | None = None) -> None:
+    """Every active subscription must hold its included credits for the CURRENT period (one grant, idempotent).
+    `organization_ids` limits the sweep (used by tests; the scheduled job passes nothing = everyone)."""
     from datetime import datetime
-    from app.db.models.billing import CreditLedgerEntry
 
     now = datetime.now(timezone.utc)
-    for sub in db.query(Subscription).filter(Subscription.status.in_(ACTIVE_STATUSES)).all():
+    query = db.query(Subscription).filter(Subscription.status.in_(ACTIVE_STATUSES))
+    if organization_ids is not None:
+        query = query.filter(Subscription.organization_id.in_(organization_ids))
+    for sub in query.all():
         if not sub.current_period_start or not sub.current_period_end or sub.current_period_end <= now:
             continue
-        has = (
-            db.query(CreditLedgerEntry.id)
-            .filter(
-                CreditLedgerEntry.organization_id == sub.organization_id,
-                CreditLedgerEntry.kind == "plan_grant",
-                CreditLedgerEntry.period_start == sub.current_period_start,
-            )
-            .first()
-            is not None
-        )
-        if has:
-            continue
+        if period_grant_deficit_seconds(db, sub, now) <= 0:
+            continue  # the period already holds the current plan's full allowance (a downgrade never claws back)
         label = sub.external_subscription_id or str(sub.id)
         if not apply:
             report.missing_grants.append(label)

@@ -57,6 +57,13 @@ class CreditSummary:
     status: str  # "ok" | "low" | "empty"
 
 
+@dataclass
+class _PeriodGrant:
+    period_start: datetime
+    period_end: datetime
+    seconds: int
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -93,7 +100,7 @@ def ensure_plan_grant(db: Session, sub: Subscription, now: datetime | None = Non
     plan = PLANS.get(sub.plan_id)
     if plan is None or plan.included_minutes <= 0:
         return False
-    key = f"grant:{sub.external_subscription_id or sub.id}:{sub.current_period_start.isoformat()}"
+    key = _grant_key(sub)
     created = _insert_once(
         db,
         CreditLedgerEntry(
@@ -110,7 +117,67 @@ def ensure_plan_grant(db: Session, sub: Subscription, now: datetime | None = Non
     )
     if created:
         logger.info("Granted %s min [org=%s plan=%s period=%s]", plan.included_minutes, sub.organization_id, plan.id, sub.current_period_start)
-    return created
+
+    # Mid-period upgrade: top the period's allowance up to the current plan's, once. A downgrade (or
+    # repeating an upgrade) finds nothing missing, so nothing is granted and nothing is ever clawed back.
+    missing = period_grant_deficit_seconds(db, sub, now)
+    topped_up = False
+    if missing > 0:
+        target = _period_granted_seconds(db, sub) + missing
+        topped_up = _insert_once(
+            db,
+            CreditLedgerEntry(
+                organization_id=sub.organization_id,
+                kind="plan_grant",
+                bucket=INCLUDED,
+                seconds=missing,
+                period_start=sub.current_period_start,
+                period_end=sub.current_period_end,
+                reference=sub.external_subscription_id,
+                idempotency_key=f"{key}:topup-to:{target}",  # same target => same key: a replay or a race inserts nothing
+                note=f"Upgrade to {plan.name}: included minutes topped up for this period",
+            ),
+        )
+        if topped_up:
+            logger.info("Upgrade top-up %s s [org=%s plan=%s period=%s]", missing, sub.organization_id, plan.id, sub.current_period_start)
+    return created or topped_up
+
+
+def _grant_key(sub: Subscription) -> str:
+    """Idempotency key of the period's base grant. The period start is rendered in UTC so the key is the
+    same whether the datetime came from a webhook payload (UTC) or was re-read from Postgres, which returns
+    timestamptz in the SESSION timezone (e.g. +05:30) - otherwise one period could be granted twice."""
+    start = sub.current_period_start
+    start = start.replace(tzinfo=timezone.utc) if start.tzinfo is None else start.astimezone(timezone.utc)
+    return f"grant:{sub.external_subscription_id or sub.id}:{start.isoformat()}"
+
+
+def _period_granted_seconds(db: Session, sub: Subscription) -> int:
+    """Included minutes already granted for this subscription's current period (base grant + any top-ups).
+    Matched on the period's start INSTANT, not on key text, so it is independent of timezone rendering."""
+    return int(
+        db.query(func.coalesce(func.sum(CreditLedgerEntry.seconds), 0))
+        .filter(
+            CreditLedgerEntry.organization_id == sub.organization_id,
+            CreditLedgerEntry.kind == "plan_grant",
+            CreditLedgerEntry.period_start == sub.current_period_start,
+        )
+        .scalar()
+    )
+
+
+def period_grant_deficit_seconds(db: Session, sub: Subscription, now: datetime | None = None) -> int:
+    """Seconds the current plan allows this period beyond what was already granted (0 if none / not eligible)."""
+    now = now or _now()
+    if sub.status not in ACTIVE_STATUSES or not sub.current_period_start or not sub.current_period_end:
+        return 0
+    if sub.current_period_end <= now:
+        return 0
+    plan = PLANS.get(sub.plan_id)
+    if plan is None or plan.included_minutes <= 0:
+        return 0
+    granted = _period_granted_seconds(db, sub)
+    return max(0, plan.included_minutes * 60 - granted)
 
 
 def ensure_current_grant(db: Session, organization_id: uuid.UUID) -> bool:
@@ -160,12 +227,22 @@ def _chargeable_seconds(db: Session, organization_id: uuid.UUID, start=None, end
 def credit_summary(db: Session, organization_id: uuid.UUID, now: datetime | None = None) -> CreditSummary:
     now = now or _now()
     settings = get_settings()
-    grants = (
+    rows = (
         db.query(CreditLedgerEntry)
         .filter(CreditLedgerEntry.organization_id == organization_id, CreditLedgerEntry.kind == "plan_grant")
         .order_by(CreditLedgerEntry.period_start.asc(), CreditLedgerEntry.created_at.asc())
         .all()
     )
+    # Rows sharing a period_start are ONE allowance (base grant + upgrade top-ups): merge them so the
+    # period is attributed usage once, not once per row, and "the newer grant owns the overlap" below
+    # only ever applies between genuinely different periods.
+    merged: dict[datetime, _PeriodGrant] = {}
+    for r in rows:
+        if r.period_start in merged:
+            merged[r.period_start].seconds += r.seconds
+        else:
+            merged[r.period_start] = _PeriodGrant(r.period_start, r.period_end, r.seconds)
+    grants = list(merged.values())
 
     attributed = 0
     overage = 0

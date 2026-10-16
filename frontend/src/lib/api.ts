@@ -329,6 +329,29 @@ export interface CallOut {
   sentiment: string | null;
 }
 
+export interface CallRow extends CallOut {
+  lead_id: string | null;
+  lead_name: string | null;
+  lead_status: string | null;
+}
+
+/** One call with the lead it produced. The lead's details are lead information, never a caller identity. */
+export interface CallDetail extends CallRow {
+  lead_phone: string | null;
+  lead_email: string | null;
+  lead_reason: string | null;
+  lead_summary: string | null;
+}
+
+export interface CallPage {
+  items: CallRow[];
+  total: number; // calls matching the filters
+  total_seconds: number; // time on those calls
+  leads_captured: number; // of those calls, how many produced a lead
+  limit: number;
+  offset: number;
+}
+
 export interface LeadOut {
   id: string;
   name: string | null;
@@ -339,6 +362,22 @@ export interface LeadOut {
   status: string;
   source: string;
   created_at: string;
+}
+
+/** A lead plus the call it came from, when it came from one. Every field is a stored value. */
+export interface LeadRow extends LeadOut {
+  call_id: string | null;
+  call_started_at: string | null;
+  call_direction: string | null;
+  call_duration_seconds: number | null;
+}
+
+export interface LeadPage {
+  items: LeadRow[];
+  total: number; // leads matching the search and status
+  counts: Record<string, number>; // per status, for the search (ignores the status filter)
+  limit: number;
+  offset: number;
 }
 
 export const api = {
@@ -646,11 +685,14 @@ export const api = {
     );
   },
 
+  browseCalls: (orgId: string, params: Record<string, string>) =>
+    request<CallPage>(`/api/v1/orgs/${orgId}/calls/browse?${new URLSearchParams(params)}`),
+
   getCall: (
     orgId: string,
     callId: string,
   ) =>
-    request<CallOut>(
+    request<CallDetail>(
       `/api/v1/orgs/${orgId}/calls/${callId}`,
     ),
 
@@ -677,6 +719,9 @@ export const api = {
       `/api/v1/orgs/${orgId}/leads${qs ? `?${qs}` : ""}`,
     );
   },
+
+  browseLeads: (orgId: string, params: Record<string, string>) =>
+    request<LeadPage>(`/api/v1/orgs/${orgId}/leads/browse?${new URLSearchParams(params)}`),
 
   updateLeadStatus: (
     orgId: string,

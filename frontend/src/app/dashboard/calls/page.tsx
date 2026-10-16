@@ -1,149 +1,211 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Phone } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Phone, SearchX } from "lucide-react";
 import { useOrganization } from "@/lib/useOrganization";
-import { api, CallOut, CallSearchHit, describeError } from "@/lib/api";
+import { api, type CallRow } from "@/lib/api";
+import { browserTimeZone } from "@/lib/credits";
+import {
+  DEFAULT_FILTERS,
+  PAGE_SIZE,
+  activeFilterCount,
+  clampOffset,
+  filterProblem,
+  formatTotalTime,
+  pageInfo,
+  toQuery,
+  type CallFilterState,
+} from "@/lib/calls";
 import { useFeatures } from "@/lib/useFeatures";
-import { TranscriptDialog, clock } from "@/components/calls/TranscriptDialog";
+import { useLoad } from "@/lib/useLoad";
 import { DashboardShell, LoadingScreen, ErrorScreen } from "@/components/dashboard/DashboardShell";
+import { CallFilters } from "@/components/calls/CallFilters";
+import { CallList } from "@/components/calls/CallList";
+import { CallDetailDialog } from "@/components/calls/CallDetailDialog";
+import { ConversationSearch } from "@/components/calls/ConversationSearch";
 
-function formatDuration(seconds: number | null): string {
-  if (seconds == null) return "—";
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
+const SEARCH_DEBOUNCE_MS = 350;
 
 export default function CallsPage() {
   const { org, loading, error } = useOrganization();
-  const [calls, setCalls] = useState<CallOut[]>([]);
-  const [dataLoading, setDataLoading] = useState(true);
-  const [dataError, setDataError] = useState<string | null>(null);
-  const { features } = useFeatures(org?.id);
-  const hasTranscripts = features?.has("transcripts") ?? false;
-  const hasSearch = features?.has("transcript_search") ?? false;
-  const [open, setOpen] = useState<string | null>(null);
-  const [q, setQ] = useState("");
-  const [hits, setHits] = useState<CallSearchHit[] | null>(null);
-  const [searchError, setSearchError] = useState<string | null>(null);
+  const orgId = org?.id;
+  const { features } = useFeatures(orgId);
+  const canReadConversation = features?.has("transcripts") ?? false;
+  const canSearchConversations = features?.has("transcript_search") ?? false;
 
-  async function runSearch(e: React.FormEvent) {
-    e.preventDefault();
-    if (!org || q.trim().length < 2) return;
-    setSearchError(null);
-    try {
-      setHits(await api.searchCalls(org.id, q.trim()));
-    } catch (err) {
-      setHits(null);
-      setSearchError(describeError(err, "Search didn't work. Try again."));
-    }
-  }
-
+  const [filters, setFilters] = useState<CallFilterState>(DEFAULT_FILTERS);
+  const [searchText, setSearchText] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [open, setOpen] = useState<{ id: string; row: CallRow | null } | null>(null);
+  // The timezone is read after mount so server and browser render the same first frame.
+  const [tz, setTz] = useState("UTC");
+  // A shared link (?call=<id>) opens that call. Both reads happen in a callback, after the first paint.
   useEffect(() => {
-    if (!org) return;
-    api
-      .listCalls(org.id, { limit: 50 })
-      .then(setCalls)
-      .catch(() => setDataError("Couldn't load calls."))
-      .finally(() => setDataLoading(false));
-  }, [org]);
+    const t = setTimeout(() => {
+      setTz(browserTimeZone());
+      const id = new URLSearchParams(window.location.search).get("call");
+      if (id) setOpen({ id, row: null });
+    }, 0);
+    return () => clearTimeout(t);
+  }, []);
+
+  // Typing in the search box applies after a short pause, and always returns to the first page.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setFilters((f) => (f.q === searchText ? f : { ...f, q: searchText }));
+      setOffset(0);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [searchText]);
+
+  const problem = filterProblem(filters);
+  const query = useMemo(() => toQuery(filters, tz, offset), [filters, tz, offset]);
+  const page = useLoad(orgId && !problem ? `${orgId}:${JSON.stringify(query)}` : null, () => api.browseCalls(orgId!, query), "We couldn't load your calls.");
 
   if (loading) return <LoadingScreen />;
   if (error) return <ErrorScreen message={error} />;
 
+  const data = page.data ?? page.last;
+  const stale = page.loading && page.data === null;
+  const narrowed = activeFilterCount(filters) > 0;
+
+  function change(patch: Partial<CallFilterState>) {
+    setFilters((f) => ({ ...f, ...patch }));
+    setOffset(0);
+  }
+  function clear() {
+    setFilters(DEFAULT_FILTERS);
+    setSearchText("");
+    setOffset(0);
+  }
+  function show(id: string, row: CallRow | null) {
+    setOpen({ id, row });
+    window.history.replaceState(null, "", `?call=${encodeURIComponent(id)}`);
+  }
+  function hide() {
+    setOpen(null);
+    window.history.replaceState(null, "", window.location.pathname);
+  }
+
+  // A filter change (or fewer calls than before) can leave the offset past the end: step back to the last page.
+  const fixedOffset = data ? clampOffset(offset, data.total, PAGE_SIZE) : offset;
+  const info = data ? pageInfo(data.total, data.offset, data.limit, data.items.length) : null;
+
   return (
     <DashboardShell org={org}>
       <h1 className="font-[family-name:var(--font-display)] text-[24px] font-bold tracking-tight">Calls</h1>
+      <p className="mt-1 text-[14.5px] text-[var(--color-ink-soft)]" aria-live="polite">
+        {data
+          ? data.total === 0
+            ? narrowed ? "No calls match." : "No calls yet."
+            : `${data.total.toLocaleString()} ${narrowed ? "matching " : ""}${data.total === 1 ? "call" : "calls"} · ${formatTotalTime(data.total_seconds)} on the phone · ${data.leads_captured.toLocaleString()} ${data.leads_captured === 1 ? "lead" : "leads"} captured`
+          : page.error
+            ? ""
+            : "Loading…"}
+      </p>
 
-      {features && !hasTranscripts && (
-        <p className="mt-2 text-[13.5px] text-[var(--color-ink-soft)]">Full conversations and search are part of the Growth plan. Summaries are included on every plan.</p>
+      {features && !canReadConversation && (
+        <p className="mt-2 text-[13.5px] text-[var(--color-ink-soft)]">Full conversations and conversation search are part of the Growth plan. Summaries are included on every plan.</p>
       )}
-      {hasSearch && (
-        <form onSubmit={runSearch} className="mt-4 flex gap-2" role="search">
-          <input
-            value={q}
-            onChange={(e) => {
-              setQ(e.target.value);
-              if (!e.target.value.trim()) setHits(null);
-            }}
-            maxLength={100}
-            placeholder="Search what callers said"
-            aria-label="Search conversations"
-            className="min-w-0 flex-1 rounded-full border border-[var(--color-line)] bg-transparent px-4 py-2 text-[14px] outline-none focus:border-[var(--color-ink)]"
-          />
-          <button disabled={q.trim().length < 2} className="rounded-full bg-[var(--color-ink)] px-4 py-2 text-[13.5px] font-medium text-[var(--color-paper)] disabled:opacity-50">
-            Search
-          </button>
-        </form>
+
+      <div className="mt-5">
+        <CallFilters value={filters} searchText={searchText} onSearchText={setSearchText} onChange={change} onClear={clear} />
+      </div>
+
+      {canSearchConversations && orgId && (
+        <div className="mt-5">
+          <ConversationSearch orgId={orgId} tz={tz} onOpen={(id) => show(id, null)} />
+        </div>
       )}
-      {searchError && <p className="mt-3 text-[13.5px] text-[#7a2416]">{searchError}</p>}
-      {hits && (
-        <div className="mt-4 space-y-2">
-          {hits.length === 0 && <p className="text-[13.5px] text-[var(--color-ink-soft)]">No conversations mention “{q.trim()}”.</p>}
-          {hits.map((h) => (
-            <button key={h.call_id} onClick={() => setOpen(h.call_id)} className="block w-full min-w-0 rounded-lg border border-[var(--color-line)] bg-[var(--color-paper-raised)] px-4 py-3 text-left">
-              <div className="text-[13.5px] font-medium">
-                {h.caller_number || "Unknown caller"}
-                {h.started_at && <span className="ml-2 font-normal text-[var(--color-ink-soft)]">{new Date(h.started_at).toLocaleDateString()}</span>}
-              </div>
-              {h.matches.map((m, i) => (
-                <p key={i} className="mt-1 break-words text-[13px] text-[var(--color-ink-soft)]">
-                  <span className="font-medium text-[var(--color-ink)]">{m.speaker}</span>
-                  {m.start_seconds != null && ` ${clock(m.start_seconds)}`}: {m.snippet}
-                </p>
-              ))}
+
+      <div className="mt-6" aria-busy={page.loading}>
+        {page.error && !data && (
+          <div role="alert" className="rounded-xl border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-5">
+            <p className="text-[13.5px] text-[#7a2416]">{page.error}</p>
+            <button onClick={page.retry} className="mt-3 rounded-full border border-[var(--color-line)] px-4 py-1.5 text-[13px] font-medium">
+              Try again
             </button>
-          ))}
-        </div>
-      )}
+          </div>
+        )}
 
-      {dataLoading && <p className="mt-6 text-[14px] text-[var(--color-ink-soft)]">Loading…</p>}
-      {dataError && <p className="mt-6 text-[14px] text-[var(--color-ring)]">{dataError}</p>}
+        {!data && !page.error && !problem && (
+          <div className="space-y-2" aria-label="Loading calls">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <div key={i} className="h-[68px] animate-pulse rounded-xl border border-[var(--color-line)] bg-[var(--color-paper-raised)]" />
+            ))}
+          </div>
+        )}
 
-      {!dataLoading && !dataError && calls.length === 0 && (
-        <div className="mt-10 flex flex-col items-center rounded-2xl border border-dashed border-[var(--color-line)] px-6 py-16 text-center">
-          <Phone className="h-8 w-8 text-[var(--color-ink-soft)]" strokeWidth={1.5} />
-          <h2 className="mt-4 text-[16px] font-semibold">No calls yet</h2>
-          <p className="mt-1.5 max-w-xs text-[14px] text-[var(--color-ink-soft)]">
-            Calls will appear here once your receptionist is active and answering.
-          </p>
-        </div>
-      )}
+        {data && data.total === 0 && !narrowed && (
+          <div className="flex flex-col items-center rounded-2xl border border-dashed border-[var(--color-line)] px-6 py-16 text-center">
+            <Phone className="h-8 w-8 text-[var(--color-ink-soft)]" strokeWidth={1.5} aria-hidden />
+            <h2 className="mt-4 text-[16px] font-semibold">No calls yet</h2>
+            <p className="mt-1.5 max-w-xs text-[14px] text-[var(--color-ink-soft)]">Calls will appear here once your receptionist is active and answering.</p>
+          </div>
+        )}
 
-      {!dataLoading && calls.length > 0 && (
-        <div className="relative mt-6 overflow-x-auto rounded-xl border border-[var(--color-line)]">
-          <table className="w-full min-w-[640px] text-left text-[13.5px]">
-            <thead className="border-b border-[var(--color-line)] bg-[var(--color-paper-raised)] text-[12px] uppercase tracking-wide text-[var(--color-ink-soft)]">
-              <tr>
-                <th className="px-4 py-3 font-medium">Caller</th>
-                <th className="px-4 py-3 font-medium">Direction</th>
-                <th className="px-4 py-3 font-medium">Duration</th>
-                <th className="px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3 font-medium">Summary</th>
-                {hasTranscripts && <th className="px-4 py-3 font-medium"><span className="sr-only">Conversation</span></th>}
-              </tr>
-            </thead>
-            <tbody>
-              {calls.map((c) => (
-                <tr key={c.id} className="border-b border-[var(--color-line)] last:border-0">
-                  <td className="px-4 py-3">{c.caller_number || "Unknown"}</td>
-                  <td className="px-4 py-3 capitalize">{c.direction}</td>
-                  <td className="px-4 py-3">{formatDuration(c.duration_seconds)}</td>
-                  <td className="px-4 py-3">{c.status || "—"}</td>
-                  <td className="max-w-xs truncate px-4 py-3 text-[var(--color-ink-soft)]">{c.summary || "—"}</td>
-                  {hasTranscripts && (
-                    <td className="px-4 py-3">
-                      <button onClick={() => setOpen(c.id)} className="whitespace-nowrap text-[13px] font-medium underline">View conversation</button>
-                    </td>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        {data && data.total === 0 && narrowed && (
+          <div className="flex flex-col items-center rounded-2xl border border-dashed border-[var(--color-line)] px-6 py-14 text-center">
+            <SearchX className="h-8 w-8 text-[var(--color-ink-soft)]" strokeWidth={1.5} aria-hidden />
+            <h2 className="mt-4 text-[16px] font-semibold">No calls match these filters</h2>
+            <p className="mt-1.5 max-w-xs text-[14px] text-[var(--color-ink-soft)]">Try a wider date range or remove a filter.</p>
+            <button onClick={clear} className="mt-4 rounded-full border border-[var(--color-line)] px-4 py-1.5 text-[13px] font-medium">
+              Clear filters
+            </button>
+          </div>
+        )}
+
+        {data && data.total > 0 && data.items.length === 0 && (
+          <div className="rounded-xl border border-[var(--color-line)] p-5 text-[13.5px]">
+            That page is past the last call.{" "}
+            <button onClick={() => setOffset(fixedOffset)} className="font-medium underline">
+              Go to the last page
+            </button>
+          </div>
+        )}
+
+        {data && data.items.length > 0 && (
+          <div className={stale ? "opacity-60 transition-opacity" : ""}>
+            <CallList calls={data.items} tz={tz} onOpen={(c) => show(c.id, c)} />
+            {page.error && <p className="mt-3 text-[13px] text-[#7a2416]">{page.error}</p>}
+            {info && (
+              <nav aria-label="Pages" className="mt-4 flex items-center justify-between gap-3">
+                <span className="text-[13px] text-[var(--color-ink-soft)]">
+                  {info.from.toLocaleString()}–{info.to.toLocaleString()} of {data.total.toLocaleString()}
+                </span>
+                <div className="flex gap-2">
+                  <button
+                    disabled={!info.hasPrev || page.loading}
+                    onClick={() => setOffset(Math.max(0, data.offset - PAGE_SIZE))}
+                    className="rounded-full border border-[var(--color-line)] px-4 py-1.5 text-[13px] font-medium disabled:opacity-40"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    disabled={!info.hasNext || page.loading}
+                    onClick={() => setOffset(data.offset + PAGE_SIZE)}
+                    className="rounded-full border border-[var(--color-line)] px-4 py-1.5 text-[13px] font-medium disabled:opacity-40"
+                  >
+                    Next
+                  </button>
+                </div>
+              </nav>
+            )}
+          </div>
+        )}
+      </div>
+
+      {orgId && open && (
+        <CallDetailDialog
+          orgId={orgId}
+          callId={open.id}
+          initial={open.row}
+          tz={tz}
+          canReadConversation={canReadConversation}
+          planKnown={features !== null}
+          onClose={hide}
+        />
       )}
-      {org && open && <TranscriptDialog orgId={org.id} callId={open} onClose={() => setOpen(null)} />}
     </DashboardShell>
   );
 }

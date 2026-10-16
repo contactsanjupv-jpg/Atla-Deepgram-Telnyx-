@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     # After service is suspended, the number is kept this long (so a returning
     # customer keeps it) and then released. Each kept number costs $2/mo.
     NUMBER_RELEASE_DELAY_DAYS: int = 7
+    # Automatic number purchase after a confirmed (status "active") Paddle subscription. A rejected purchase
+    # (e.g. the provider account has no payment method / balance) is retried at most this often and this many times.
+    AUTO_PROVISION_NUMBERS: bool = True
+    AUTO_PROVISION_COUNTRY: str = "US"
+    AUTO_PROVISION_RETRY_MINUTES: int = 30
+    AUTO_PROVISION_MAX_ATTEMPTS: int = 10
     # Outgoing email (password reset). Any SMTP provider works. Without SMTP_HOST,
     # development logs the message instead; production logs an error (no email is sent).
     SMTP_HOST: str = ""

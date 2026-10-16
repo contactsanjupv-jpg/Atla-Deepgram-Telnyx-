@@ -16,6 +16,7 @@ import time
 
 from app.db.base import SessionLocal
 from app.providers.phone.retell_phone_provider import RetellPhoneProvider
+from app.services.auto_provisioning import settle_auto_provisioning
 from app.services.entitlement import enforce_entitlements
 from app.services.phone_provisioning import reconcile_provisioning
 from app.services.topups import reconcile_topups
@@ -28,12 +29,21 @@ VOICE_SYNC_SECONDS = 6 * 3600
 
 
 def run_once(phone_provider=None) -> dict:
-    summary: dict = {"events": retry_due_events()}
+    try:
+        summary: dict = {"events": retry_due_events()}
+    except Exception:  # noqa: BLE001 - a failed sweep (e.g. the database restarting) must not stop the other jobs or the loop
+        logger.exception("Retell event sweep failed; will retry next pass")
+        summary = {"events": "error"}
     db = SessionLocal()
     try:
         provider = phone_provider or RetellPhoneProvider()
         summary["provisioning_settled"] = reconcile_provisioning(db, provider)
         summary["entitlements"] = enforce_entitlements(db, provider)
+        try:
+            summary["auto_provisioning"] = settle_auto_provisioning(db, provider)
+        except Exception:  # noqa: BLE001 - must not stop the other jobs
+            db.rollback()
+            logger.exception("Automatic number provisioning sweep failed")
         try:
             summary["topups"] = reconcile_topups(db)  # settles purchases whose webhook never arrived
         except RuntimeError:

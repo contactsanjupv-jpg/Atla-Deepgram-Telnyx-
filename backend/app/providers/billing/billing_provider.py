@@ -26,3 +26,8 @@ class BillingProvider(ABC):
 
     @abstractmethod
     def get_management_urls(self, external_subscription_id: str) -> dict: ...
+
+    def get_subscription(self, external_subscription_id: str) -> dict | None:
+        """The provider's own current record of a subscription (None if it has none). Providers that cannot
+        look one up leave this unimplemented, which callers must treat as "unverified" (never as success)."""
+        raise NotImplementedError("This billing provider cannot look up subscriptions")
