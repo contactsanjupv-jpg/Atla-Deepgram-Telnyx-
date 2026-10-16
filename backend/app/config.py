@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     # Below this share of the monthly allowance (or fewer than this many minutes) the dashboard warns.
     LOW_CREDIT_PERCENT: int = 20
 
+    # ---- Monitoring (see docs/MONITORING.md). Both optional; nothing is "configured" until you set them. ----
+    # Bearer token for GET /health/alerts (counts of things needing a human). Unset = that endpoint is disabled.
+    MONITORING_TOKEN: str = ""
+    # Slack/Discord/ntfy-style incoming webhook. The worker POSTs {"text": ...} when an alert FIRES (once per cooldown).
+    ALERT_WEBHOOK_URL: str = ""
+    ALERT_COOLDOWN_SECONDS: int = 6 * 3600
+
     # Paddle (billing) — server-side only
     PADDLE_ENV: str = "sandbox"  # "sandbox" | "live"
     PADDLE_API_KEY: str = ""

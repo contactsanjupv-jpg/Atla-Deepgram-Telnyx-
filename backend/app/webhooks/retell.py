@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db.base import get_db
 from app.db.models.platform import WebhookEvent, WebhookSource
+from app.services import monitoring
 from app.webhooks.retell_signature import InvalidRetellSignature, verify_retell_signature
 
 router = APIRouter()
@@ -53,6 +54,7 @@ async def handle_retell_webhook(
             len(raw_body),
             (settings.RETELL_API_KEY or "")[-4:] or "<EMPTY - RETELL_API_KEY is not set>",
         )
+        monitoring.count_event("webhook_rejected:retell")
         return Response(status_code=status.HTTP_401_UNAUTHORIZED)
 
     try:

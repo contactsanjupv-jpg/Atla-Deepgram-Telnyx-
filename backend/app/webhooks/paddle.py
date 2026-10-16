@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db.base import get_db
 from app.db.models.platform import WebhookEvent, WebhookSource
-from app.services import refunds, topups
+from app.services import monitoring, refunds, topups
 from app.services.duplicate_subscriptions import after_subscription_applied
 from app.services.subscription_sync import parse_dt as _parse_dt
 from app.services.subscription_sync import sync_subscription as _sync_subscription
@@ -75,6 +75,7 @@ async def handle_paddle_webhook(
     if not verify_paddle_signature(
         raw_body, paddle_signature, settings.PADDLE_WEBHOOK_SECRET, settings.PADDLE_WEBHOOK_MAX_SKEW_SECONDS
     ):
+        monitoring.count_event("webhook_rejected:paddle")
         return Response(status_code=status.HTTP_401_UNAUTHORIZED)
 
     try:
@@ -118,6 +119,7 @@ async def handle_paddle_webhook(
     except Exception:
         db.rollback()
         logger.exception("Paddle webhook processing failed: %s", event_id)
+        monitoring.count_event("webhook_failed:paddle")
         return Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     if event_type in _SUBSCRIPTION_EVENTS:
