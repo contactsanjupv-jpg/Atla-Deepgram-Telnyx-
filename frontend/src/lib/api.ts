@@ -334,7 +334,6 @@ export interface CallRow extends CallOut {
   lead_name: string | null;
   lead_status: string | null;
 }
-
 /** One call with the lead it produced. The lead's details are lead information, never a caller identity. */
 export interface CallDetail extends CallRow {
   lead_phone: string | null;
@@ -363,7 +362,6 @@ export interface LeadOut {
   source: string;
   created_at: string;
 }
-
 /** A lead plus the call it came from, when it came from one. Every field is a stored value. */
 export interface LeadRow extends LeadOut {
   call_id: string | null;
@@ -687,7 +685,6 @@ export const api = {
 
   browseCalls: (orgId: string, params: Record<string, string>) =>
     request<CallPage>(`/api/v1/orgs/${orgId}/calls/browse?${new URLSearchParams(params)}`),
-
   getCall: (
     orgId: string,
     callId: string,
@@ -719,10 +716,9 @@ export const api = {
       `/api/v1/orgs/${orgId}/leads${qs ? `?${qs}` : ""}`,
     );
   },
-
+  
   browseLeads: (orgId: string, params: Record<string, string>) =>
     request<LeadPage>(`/api/v1/orgs/${orgId}/leads/browse?${new URLSearchParams(params)}`),
-
   updateLeadStatus: (
     orgId: string,
     leadId: string,

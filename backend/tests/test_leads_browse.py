@@ -65,7 +65,7 @@ def test_the_call_a_lead_came_from_is_linked():
     _lead(org, name="Walk-in", age_hours=2)
     with_call, without = _browse(c, org).json()["items"]
     assert with_call["call_id"] == cid and with_call["call_direction"] == "inbound" and with_call["call_duration_seconds"] == 95
-    assert with_call["call_started_at"].startswith("2026-10-12T15:30")
+    assert datetime.fromisoformat(with_call["call_started_at"]) == T0
     assert without["call_id"] is None and without["call_started_at"] is None
 
 

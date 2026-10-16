@@ -39,6 +39,52 @@ def list_leads(
     leads = query.order_by(Lead.created_at.desc()).limit(limit).offset(offset).all()
     return [LeadOut.model_validate(lead) for lead in leads]
 
+class LeadRow(LeadOut):
+    """A lead plus the call it came from, if it came from one (leads can also exist without a call)."""
+
+    call_id: str | None = None
+    call_started_at: datetime | None = None
+    call_direction: str | None = None
+    call_duration_seconds: int | None = None
+
+
+class LeadPage(BaseModel):
+    items: list[LeadRow]
+    total: int  # leads matching the search and status
+    counts: dict[str, int]  # per status, for the search (ignores the status filter)
+    limit: int
+    offset: int
+
+
+def _lead_row(lead: Lead, call) -> LeadRow:
+    return LeadRow(
+        **LeadOut.model_validate(lead).model_dump(),
+        call_id=str(call.id) if call else None,
+        call_started_at=(call.started_at or call.created_at) if call else None,
+        call_direction=call.direction.value if call and hasattr(call.direction, "value") else (call.direction if call else None),
+        call_duration_seconds=call.duration_seconds if call else None,
+    )
+
+@router.get("/browse", response_model=LeadPage)
+def browse_leads(
+    q: str | None = Query(default=None, max_length=200),
+    lead_status: Literal["new", "contacted", "booked", "closed"] | None = Query(default=None, alias="status"),
+    sort: Literal["newest", "oldest"] = "newest",
+    limit: int = Query(default=25, ge=1, le=MAX_PAGE_SIZE),
+    offset: int = Query(default=0, ge=0),
+    membership: OrganizationMember = Depends(current_membership),
+    db: Session = Depends(get_db),
+):
+    """Every lead this organization has captured: searchable, filterable by status, pageable. All plans."""
+    term = calls_query.clean_query(q)
+    if term is not None and len(term) < calls_query.MIN_QUERY_CHARS:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Type at least {calls_query.MIN_QUERY_CHARS} characters to search.")
+    searched = leads_query.base_query(db, membership.organization_id, term)
+    counts = leads_query.status_counts(searched)
+    filtered = leads_query.with_status(searched, lead_status)
+    total = counts[lead_status] if lead_status else sum(counts.values())
+    rows = leads_query.order(filtered, sort).limit(limit).offset(offset).all()
+    return LeadPage(items=[_lead_row(*r) for r in rows], total=total, counts=counts, limit=limit, offset=offset)
 
 class LeadRow(LeadOut):
     """A lead plus the call it came from, if it came from one (leads can also exist without a call)."""

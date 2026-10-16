@@ -144,17 +144,15 @@ def ensure_plan_grant(db: Session, sub: Subscription, now: datetime | None = Non
 
 
 def _grant_key(sub: Subscription) -> str:
-    """Idempotency key of the period's base grant. The period start is rendered in UTC so the key is the
-    same whether the datetime came from a webhook payload (UTC) or was re-read from Postgres, which returns
-    timestamptz in the SESSION timezone (e.g. +05:30) - otherwise one period could be granted twice."""
     start = sub.current_period_start
-    start = start.replace(tzinfo=timezone.utc) if start.tzinfo is None else start.astimezone(timezone.utc)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    else:
+        start = start.astimezone(timezone.utc)
     return f"grant:{sub.external_subscription_id or sub.id}:{start.isoformat()}"
 
-
 def _period_granted_seconds(db: Session, sub: Subscription) -> int:
-    """Included minutes already granted for this subscription's current period (base grant + any top-ups).
-    Matched on the period's start INSTANT, not on key text, so it is independent of timezone rendering."""
+    """Included seconds already granted for this billing period."""
     return int(
         db.query(func.coalesce(func.sum(CreditLedgerEntry.seconds), 0))
         .filter(
