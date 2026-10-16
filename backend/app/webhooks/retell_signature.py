@@ -34,6 +34,10 @@ def verify_retell_signature(
     JSON.dumps() of the parsed body will intermittently fail (key ordering,
     whitespace) and worse, can be tricked by a payload that reserializes
     differently than what was actually signed."""
+    if not api_key:
+        # HMAC with an empty key is computable by anyone: an unconfigured server must reject everything,
+        # never accept a "valid" signature made with a public (empty) secret.
+        raise InvalidRetellSignature("RETELL_API_KEY is not configured")
     if not signature_header:
         raise InvalidRetellSignature("Missing X-Retell-Signature header")
 

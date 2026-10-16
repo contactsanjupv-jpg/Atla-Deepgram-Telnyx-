@@ -95,3 +95,43 @@ def test_a_failing_event_sweep_does_not_kill_the_worker_or_skip_the_other_jobs(m
 
     assert summary["events"] == "error"
     assert ran == ["provisioning", "entitlements", "topups"]
+
+
+# ---------------- webhook signature with an unconfigured key ----------------
+
+def _forged(body: bytes, key: str = "") -> dict:
+    import hashlib
+    import hmac
+    import time
+
+    ts = str(int(time.time() * 1000))
+    d = hmac.new(key.encode(), body + ts.encode(), hashlib.sha256).hexdigest()
+    return {"X-Retell-Signature": f"v={ts},d={d}", "Content-Type": "application/json"}
+
+
+def test_a_signature_made_with_an_empty_key_is_rejected_when_the_key_is_not_configured(monkeypatch):
+    """Anyone can compute an HMAC keyed with "". If RETELL_API_KEY is unset the webhook must reject, not accept."""
+    import json
+
+    from fastapi.testclient import TestClient
+
+    from app.db.models.platform import WebhookEvent
+    from app.main import app
+
+    monkeypatch.setattr(get_settings(), "RETELL_API_KEY", "")
+    cid = _cid()
+    body = json.dumps({"event": "call_ended", "call": {"call_id": cid}}).encode()
+    r = TestClient(app).post("/webhooks/retell", content=body, headers=_forged(body))
+    assert r.status_code == 401
+    assert _count(WebhookEvent, external_event_id=f"{cid}:call_ended") == 0
+
+
+def test_a_signature_made_with_the_wrong_key_is_still_rejected_when_the_key_is_configured():
+    import json
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    body = json.dumps({"event": "call_ended", "call": {"call_id": _cid()}}).encode()
+    assert TestClient(app).post("/webhooks/retell", content=body, headers=_forged(body, "not-the-key")).status_code == 401

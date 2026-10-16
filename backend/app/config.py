@@ -131,6 +131,23 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.ENV == "production"
 
+    def production_config_problems(self) -> list[str]:
+        """Names of settings that make a PRODUCTION deploy unsafe or non-functional. Never includes values."""
+        bad = []
+        if len(self.APP_SECRET_KEY) < 32:
+            bad.append("APP_SECRET_KEY (must be at least 32 characters)")
+        for name in ("FRONTEND_URL", "BACKEND_PUBLIC_URL"):
+            value = getattr(self, name)
+            if not value.startswith("https://"):
+                bad.append(f"{name} (must be an https:// URL)")
+        for name in (
+            "RETELL_API_KEY", "PADDLE_API_KEY", "PADDLE_WEBHOOK_SECRET", "PADDLE_STARTER_PRICE_ID",
+            "PADDLE_GROWTH_PRICE_ID", "TOKEN_ENCRYPTION_KEY", "SMTP_HOST",
+        ):
+            if not getattr(self, name):
+                bad.append(f"{name} (is empty)")
+        return bad
+
 
 @lru_cache
 def get_settings() -> Settings:

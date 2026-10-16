@@ -26,6 +26,11 @@ from app.webhooks.paddle import router as paddle_webhook_router
 
 settings = get_settings()
 
+if settings.is_production:
+    _problems = settings.production_config_problems()
+    if _problems:  # fail at start-up, not on the first customer request
+        raise RuntimeError("Unsafe production configuration: " + "; ".join(_problems))
+
 app = FastAPI(title="Atla API", version="0.1.0", docs_url=None if settings.is_production else "/docs")
 
 app.add_middleware(SecurityHeadersMiddleware)
