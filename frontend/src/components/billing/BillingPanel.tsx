@@ -108,9 +108,15 @@ export function BillingPanel({ orgId, role }: { orgId: string; role: string }) {
     setMessage(null);
     setBusy("cancel");
     try {
-      await api.cancelSubscription(orgId);
+      const res = await api.cancelSubscription(orgId);
       setConfirmingCancel(false);
-      setMessage({ text: "Cancellation requested. It can take a minute to show up here.", bad: false });
+      const ends = formatDate(res.effective_at);
+      setMessage({
+        text: ends
+          ? `Your plan is set to end on ${ends}. You keep full access until then, and you won't be charged again.`
+          : "Cancellation requested. You keep access until the end of your paid period. It can take a minute to show up here.",
+        bad: false,
+      });
       refreshTimer.current = setTimeout(load, 4000);
     } catch (err) {
       setMessage({ text: describeError(err, "We couldn't cancel right now. Please try again."), bad: true });

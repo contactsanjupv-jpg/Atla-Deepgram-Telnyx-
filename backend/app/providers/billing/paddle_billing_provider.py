@@ -165,6 +165,40 @@ class PaddleBillingProvider(BillingProvider):
             raise PaddleAPIError(f"Paddle returned {resp.status_code}", resp.status_code)
         return resp.json().get("data") or None
 
+    def create_refund(self, transaction_id: str, reason: str) -> dict:
+        """
+        FULL refund of one transaction (a Paddle adjustment, action=refund, type=full). Only services/refunds.py
+        may call this, after its authorization and eligibility checks. Returns Paddle's adjustment
+        ({"id", "status", ...}); Paddle may leave it "pending_approval".
+        """
+        try:
+            resp = httpx.post(
+                f"{self._base_url}/adjustments",
+                headers=self._headers(),
+                json={"action": "refund", "type": "full", "transaction_id": transaction_id, "reason": reason[:1000]},
+                timeout=15.0,
+            )
+        except httpx.HTTPError as e:
+            raise PaddleAPIError("Could not reach Paddle") from e
+        if resp.status_code >= 400:
+            raise PaddleAPIError(f"Paddle returned {resp.status_code}", resp.status_code)
+        return resp.json().get("data") or {}
+
+    def list_refund_adjustments(self, transaction_id: str) -> list[dict]:
+        """Paddle's refund adjustments for one transaction (used to settle an unconfirmed refund request)."""
+        try:
+            resp = httpx.get(
+                f"{self._base_url}/adjustments",
+                headers=self._headers(),
+                params={"transaction_id": transaction_id, "action": "refund"},
+                timeout=15.0,
+            )
+        except httpx.HTTPError as e:
+            raise PaddleAPIError("Could not reach Paddle") from e
+        if resp.status_code >= 400:
+            raise PaddleAPIError(f"Paddle returned {resp.status_code}", resp.status_code)
+        return [a for a in (resp.json().get("data") or []) if isinstance(a, dict)]
+
     def cancel_transaction(self, transaction_id: str) -> bool:
         """
         Best-effort: ask Paddle to cancel a not-yet-paid transaction so the customer can pick another plan.

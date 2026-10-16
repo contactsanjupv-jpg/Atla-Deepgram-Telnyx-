@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db.base import get_db
 from app.db.models.platform import WebhookEvent, WebhookSource
-from app.services import topups
+from app.services import refunds, topups
 from app.services.duplicate_subscriptions import after_subscription_applied
 from app.services.subscription_sync import parse_dt as _parse_dt
 from app.services.subscription_sync import sync_subscription as _sync_subscription
@@ -109,6 +109,7 @@ async def handle_paddle_webhook(
             topups.fail_topup(db, data)
         elif event_type in ("adjustment.created", "adjustment.updated"):
             topups.apply_adjustment(db, data)
+            refunds.record_adjustment(db, data)
         else:
             logger.info("Unhandled Paddle event type: %s", event_type)
         record.processed_at = datetime.now(timezone.utc)

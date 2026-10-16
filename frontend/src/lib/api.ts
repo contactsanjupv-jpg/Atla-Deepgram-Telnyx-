@@ -553,7 +553,7 @@ export const api = {
     ),
 
   cancelSubscription: (orgId: string) =>
-    request<{ status: string }>(
+    request<{ status: string; effective_at: string | null }>(
       `/api/v1/orgs/${orgId}/billing/cancel`,
       {
         method: "POST",

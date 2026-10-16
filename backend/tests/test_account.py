@@ -263,7 +263,8 @@ def test_cancel_requests_end_of_period_cancellation_and_state_follows_the_webhoo
     paddle_post(evt)
     body = c.get(f"/api/v1/orgs/{org}/billing/subscription").json()
     assert body["status"] == "active" and body["cancel_effective_at"].startswith("2026-11-01")
-    assert c.post(f"/api/v1/orgs/{org}/billing/cancel").json() == {"status": "already_scheduled"}
+    again = c.post(f"/api/v1/orgs/{org}/billing/cancel").json()
+    assert again["status"] == "already_scheduled" and again["effective_at"].startswith("2026-11-01")
     assert len(providers.billing.cancels) == 1
 
     undo = _event("subscription.updated", sub, org, at="2026-10-03T00:00:00.000000Z")  # customer resumed

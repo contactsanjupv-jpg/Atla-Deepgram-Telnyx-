@@ -149,3 +149,29 @@ class FreeTestAllowance(Base, UUIDPKMixin, TimestampMixin):
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     slot: Mapped[int] = mapped_column(Integer, nullable=False)
     retell_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class RefundRequest(Base, UUIDPKMixin, TimestampMixin):
+    """
+    A refund is its own, explicitly authorized action (services/refunds.py) - never a side effect of cancelling.
+    One row per Paddle transaction (unique), written BEFORE the provider call, so a repeat can never refund twice.
+    status: requested | submitted | approved | rejected | failed | unconfirmed. Only Paddle's adjustment status moves it to
+    approved / rejected; "submitted" means Paddle accepted the request and it awaits approval.
+    """
+
+    __tablename__ = "refund_requests"
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    transaction_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    basis: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    amount_minor: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="requested", nullable=False)
+    provider_adjustment_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    provider_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)

@@ -31,9 +31,10 @@ class FakePaddle:
 
     def get_subscription(self, ext):
         self.lookups += 1
-        if isinstance(self.remote, Exception):
-            raise self.remote
-        return self.remote
+        remote = self.remote.pop(0) if isinstance(self.remote, list) else self.remote  # a list = one answer per lookup
+        if isinstance(remote, Exception):
+            raise remote
+        return remote
 
 
 @pytest.fixture
@@ -63,7 +64,7 @@ def test_a_successful_cancel_is_requested_and_changes_no_local_state(org_with_su
     before = _local(org)
     fake = _use(monkeypatch, FakePaddle())
     resp = c.post(f"/api/v1/orgs/{org}/billing/cancel")
-    assert resp.status_code == 202 and resp.json() == {"status": "requested"} and fake.lookups == 0
+    assert resp.status_code == 202 and resp.json() == {"status": "requested", "effective_at": None} and fake.cancels == 1 and fake.lookups == 2
     assert _local(org) == before  # only Paddle's webhook changes it
 
 
@@ -88,16 +89,28 @@ def test_a_cancel_that_is_in_effect_at_paddle_is_not_reported_as_a_failure(org_w
     c, org = org_with_sub
     before = _local(org)
     remote = {"status": "active", "scheduled_change": {"action": "cancel", "effective_at": "2026-11-01T00:00:00Z"}}
+    # Paddle's record is checked first, so an existing schedule is confirmed WITHOUT another cancel call.
     fake = _use(monkeypatch, FakePaddle(cancel=PaddleAPIError("response lost", status), remote=remote))
     resp = c.post(f"/api/v1/orgs/{org}/billing/cancel")
-    assert resp.status_code == 202 and resp.json() == {"status": "already_scheduled"}
-    assert fake.lookups == 1 and _local(org) == before
+    assert resp.status_code == 202 and resp.json() == {"status": "already_scheduled", "effective_at": "2026-11-01T00:00:00Z"}
+    assert fake.cancels == 0 and fake.lookups == 1 and _local(org) == before
+
+
+@pytest.mark.parametrize("status", [0, 409, 500])
+def test_a_cancel_that_failed_but_is_then_confirmed_scheduled_is_not_a_failure(org_with_sub, monkeypatch, status):
+    c, org = org_with_sub
+    scheduled = {"status": "active", "scheduled_change": {"action": "cancel", "effective_at": "2026-11-01T00:00:00Z"}}
+    fake = _use(monkeypatch, FakePaddle(cancel=PaddleAPIError("response lost", status), remote=[None, scheduled]))
+    resp = c.post(f"/api/v1/orgs/{org}/billing/cancel")
+    assert resp.status_code == 202 and resp.json() == {"status": "already_scheduled", "effective_at": "2026-11-01T00:00:00Z"}
+    assert fake.cancels == 1 and fake.lookups == 2
 
 
 def test_a_subscription_paddle_reports_canceled_is_not_reported_as_a_failure(org_with_sub, monkeypatch):
     c, org = org_with_sub
-    _use(monkeypatch, FakePaddle(cancel=PaddleAPIError("cannot cancel", 409), remote={"status": "canceled"}))
-    assert c.post(f"/api/v1/orgs/{org}/billing/cancel").json() == {"status": "already_scheduled"}
+    fake = _use(monkeypatch, FakePaddle(cancel=PaddleAPIError("cannot cancel", 409), remote={"status": "canceled"}))
+    assert c.post(f"/api/v1/orgs/{org}/billing/cancel").json() == {"status": "already_scheduled", "effective_at": None}
+    assert fake.cancels == 0
 
 
 def test_a_scheduled_change_that_is_not_a_cancel_does_not_count(org_with_sub, monkeypatch):

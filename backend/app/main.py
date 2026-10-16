@@ -17,6 +17,7 @@ from app.api.v1.account import router as account_router
 from app.api.v1.analytics import router as analytics_router
 from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.billing import router as billing_router
+from app.api.v1.admin_refunds import router as admin_refunds_router
 from app.api.v1.onboarding import router as onboarding_router
 from app.api.v1.plans import router as plans_router
 from app.api.v1.usage import router as usage_router
@@ -48,6 +49,7 @@ app.include_router(calls_router)
 app.include_router(leads_router)
 app.include_router(retell_webhook_router)
 app.include_router(billing_router)
+app.include_router(admin_refunds_router)
 app.include_router(plans_router)
 app.include_router(paddle_webhook_router)
 app.include_router(usage_router)
