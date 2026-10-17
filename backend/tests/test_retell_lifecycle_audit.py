@@ -135,3 +135,38 @@ def test_a_signature_made_with_the_wrong_key_is_still_rejected_when_the_key_is_c
 
     body = json.dumps({"event": "call_ended", "call": {"call_id": _cid()}}).encode()
     assert TestClient(app).post("/webhooks/retell", content=body, headers=_forged(body, "not-the-key")).status_code == 401
+
+
+def test_a_rejected_retell_signature_never_logs_the_key_a_fragment_of_it_or_the_signature(monkeypatch, caplog):
+    import json
+    import logging
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    secret = "key_SUPERSECRETVALUE9f3a1c77"
+    monkeypatch.setattr(get_settings(), "RETELL_API_KEY", secret)
+    body = json.dumps({"event": "call_ended", "call": {"call_id": _cid()}}).encode()
+    header = "v=1700000000000,d=deadbeefdeadbeefdeadbeefdeadbeef"
+    with caplog.at_level(logging.DEBUG):
+        r = TestClient(app).post("/webhooks/retell", content=body, headers={"X-Retell-Signature": header})
+    assert r.status_code == 401
+    log = caplog.text
+    for fragment in (secret, secret[-4:], secret[-8:], secret[:8], "deadbeefdeadbeef", "api_key_last4"):
+        assert fragment not in log, fragment
+    # still diagnosable: presence of the header, body size and whether a key is configured
+    assert "signature_header_present=True" in log and f"body_bytes={len(body)}" in log and "api_key_configured=True" in log
+
+
+def test_the_rejection_log_says_when_no_key_is_configured_without_revealing_anything(monkeypatch, caplog):
+    import logging
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    monkeypatch.setattr(get_settings(), "RETELL_API_KEY", "")
+    with caplog.at_level(logging.WARNING):
+        TestClient(app).post("/webhooks/retell", content=b"{}", headers={"X-Retell-Signature": "v=1,d=ab"})
+    assert "api_key_configured=False" in caplog.text

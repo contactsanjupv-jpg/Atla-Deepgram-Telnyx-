@@ -4,7 +4,7 @@ Three layers. None needs a vendor SDK; two need an account you create. **Nothing
 
 | Layer | What it catches | Needs |
 |---|---|---|
-| `GET /health/ready` polled by an external uptime monitor | API down, database down, Redis down, **worker stopped** (no heartbeat for 120 s) | A free account at UptimeRobot / Better Stack / similar; alert to email or phone |
+| `GET /health/ready` polled by an external uptime monitor | API down, database down, Redis down, **worker stopped or stalled** (see Worker states) | A free account at UptimeRobot / Better Stack / similar; alert to email or phone |
 | Worker push to `ALERT_WEBHOOK_URL` | Business conditions (below), each announced once per 6 h | A Slack/Discord/ntfy incoming-webhook URL |
 | `GET /health/alerts` (bearer `MONITORING_TOKEN`) | The same conditions on demand, counts only | Set `MONITORING_TOKEN` (any long random string); unset = endpoint disabled (404) |
 
@@ -33,3 +33,20 @@ data or call content. Tests assert the alert webhook URL never appears in logs.
 ## Not configured / not verified
 Uptime monitor account, alert webhook, `MONITORING_TOKEN`, worker supervisor and log aggregation are all yours to set up.
 Error-tracking (e.g. Sentry) is not integrated.
+
+
+## Worker states (`/health/ready` → `worker_state`)
+The worker records three things in Redis: the last completed pass, a liveness beat from a background thread (every 10 s, independent of the main loop) and a phase marker while a known long job (voice-catalog sync, a pass) runs.
+
+| State | Meaning | Ready (200)? |
+|---|---|---|
+| `ok` | A pass finished in the last 120 s | yes |
+| `busy` | Process is alive (liveness < 45 s), a previous pass exists, and a marked long job has run for under 15 min | yes |
+| `starting` | Process alive, no pass completed since it started, under 15 min | **no** (not operational yet), no alert |
+| `stalled` | Process alive but no progress: stale pass with no valid long job, a long job over 15 min, or startup over 15 min | no, `worker_stopped` alert |
+| `stopped` | No liveness beat for 45 s | no, `worker_stopped` alert |
+
+A pass recorded by a previous process (older than the current `started_at`) is ignored, so a restarted worker is never ready before it completes its own first pass. A slow voice sync therefore cannot make a live worker look dead, and a hung one is still caught by the 15-minute bound. Not verified here: behaviour under a real supervisor and a real Retell voice-list latency.
+
+## Alert delivery
+A webhook response outside 2xx (including 429 and 5xx), a timeout (5 s) or a network error counts as failed: it is logged by status/exception class only (never the URL) and the dedupe key is removed, so the alert is retried on the next sweep instead of being silenced for 6 hours. Failures never crash the worker pass.

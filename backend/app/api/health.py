@@ -22,7 +22,8 @@ def ready(response: Response, db: Session = Depends(get_db)):
     ok = db_ok and redis_ok and worker["alive"]
     if not ok:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-    return {"status": "ok" if ok else "unhealthy", "database": db_ok, "redis": redis_ok, "worker": worker["alive"]}
+    return {"status": "ok" if ok else "unhealthy", "database": db_ok, "redis": redis_ok, "worker": worker["alive"],
+            "worker_state": worker["state"]}
 
 
 @router.get("/health/alerts")

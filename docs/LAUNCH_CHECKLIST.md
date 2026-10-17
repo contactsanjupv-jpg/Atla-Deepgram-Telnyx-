@@ -23,3 +23,6 @@
 | SMTP / Redis / HTTPS / worker on the real deployment | NOT VERIFIED | startup guard checks presence only; verify on deploy |
 | Lapse policies (3 days / 7 days) | TEMPORARY | docs/LAPSE_POLICIES.md - business decision pending |
 | Frontend production build | PASS (you, on your Mac) | no frontend changes since |
+
+- [ ] Set `PADDLE_ENV` explicitly in production and `NEXT_PUBLIC_PADDLE_ENV` to match; confirm the production app starts (the guard rejects contradictions).
+- [ ] After deploying the worker, confirm `/health/ready` shows `worker_state` `ok` after the first pass (`starting` before it is expected).

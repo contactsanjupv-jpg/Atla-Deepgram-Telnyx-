@@ -11,9 +11,10 @@ Minimal production monitoring. Three layers, none of which needs a vendor SDK:
 
 Nothing here ever includes secrets, URLs, ids of customers, payment data or call content: counts and categories only.
 """
-import json
 import logging
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -69,6 +70,20 @@ def counter(name: str) -> int:
 
 
 # ---------- worker heartbeat ----------
+# Three signals, so a SLOW worker is not mistaken for a DEAD one:
+#   last_pass  - written when a full pass completes (proves the loop is making progress);
+#   liveness   - written every 10 s by a background thread (proves the process is up, even inside a long operation);
+#   phase      - "name|start" while a known long operation runs (voice sync, a pass), bounded by PHASE_MAX_SECONDS.
+# started_at invalidates passes recorded by a previous process, so readiness is never reported before THIS process
+# has completed its first pass.
+LIVENESS_KEY = "atla:worker:liveness"
+STARTED_KEY = "atla:worker:started_at"
+PHASE_KEY = "atla:worker:phase"
+LIVENESS_INTERVAL_SECONDS = 10
+LIVENESS_STALE_SECONDS = 45
+PHASE_MAX_SECONDS = 900  # a long operation is tolerated this long; beyond it the worker counts as stalled
+STARTUP_GRACE_SECONDS = 900  # time allowed for the first pass (incl. the initial voice-catalog sync)
+
 
 def record_worker_pass(failed: bool) -> None:
     try:
@@ -81,15 +96,83 @@ def record_worker_pass(failed: bool) -> None:
         logger.error("ALERT could not record the worker heartbeat (Redis unreachable)")
 
 
+def beat() -> None:
+    try:
+        _redis.set(LIVENESS_KEY, str(time.time()), ex=120)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def mark_started() -> None:
+    """Called once when the worker process starts: passes recorded before this moment no longer count."""
+    try:
+        _redis.set(STARTED_KEY, str(time.time()), ex=7 * 86400)
+    except Exception:  # noqa: BLE001
+        pass
+    beat()
+
+
+def start_liveness_thread(interval: float = LIVENESS_INTERVAL_SECONDS) -> threading.Event:
+    """Daemon thread that proves the process is alive while the main loop is inside a long operation."""
+    stop = threading.Event()
+
+    def loop():
+        while not stop.wait(interval):
+            beat()
+
+    threading.Thread(target=loop, name="atla-worker-liveness", daemon=True).start()
+    return stop
+
+
+@contextmanager
+def phase(name: str):
+    """Marks a long-running operation so it is not mistaken for a stall (bounded by PHASE_MAX_SECONDS)."""
+    try:
+        _redis.set(PHASE_KEY, f"{name}|{time.time()}", ex=PHASE_MAX_SECONDS + 60)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        yield
+    finally:
+        try:
+            _redis.delete(PHASE_KEY)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def worker_status(now: float | None = None) -> dict:
+    """state: ok | busy | starting | stalled | stopped. `alive` (= ready) is True only for ok / busy."""
     now = now if now is not None else time.time()
     try:
-        last = _redis.get(HEARTBEAT_KEY)
+        last, live, started, ph = (_redis.get(k) for k in (HEARTBEAT_KEY, LIVENESS_KEY, STARTED_KEY, PHASE_KEY))
         failures = int(_redis.get(FAILURES_KEY) or 0)
     except Exception:  # noqa: BLE001
-        return {"alive": False, "age_seconds": None, "consecutive_failures": 0}
-    age = None if last is None else max(now - float(last), 0.0)
-    return {"alive": age is not None and age <= WORKER_STALE_SECONDS, "age_seconds": age, "consecutive_failures": failures}
+        return {"alive": False, "state": "stopped", "age_seconds": None, "consecutive_failures": 0}
+
+    last_t = float(last) if last else None
+    started_t = float(started) if started else None
+    if last_t is not None and started_t is not None and last_t < started_t:
+        last_t = None  # a pass from before this process started proves nothing about it
+    liveness_fresh = bool(live) and now - float(live) <= LIVENESS_STALE_SECONDS
+    last_age = None if last_t is None else max(now - last_t, 0.0)
+    phase_age = None
+    if ph and "|" in ph:
+        try:
+            phase_age = max(now - float(ph.split("|", 1)[1]), 0.0)
+        except ValueError:
+            phase_age = None
+
+    if last_age is not None and last_age <= WORKER_STALE_SECONDS:
+        state = "ok"
+    elif liveness_fresh and last_t is not None and phase_age is not None and phase_age <= PHASE_MAX_SECONDS:
+        state = "busy"  # was operational, now inside a known long operation, process demonstrably alive
+    elif liveness_fresh and last_t is None and started_t is not None and now - started_t <= STARTUP_GRACE_SECONDS:
+        state = "starting"  # up, but has not completed its first pass: NOT ready yet, and not an alarm yet
+    elif liveness_fresh:
+        state = "stalled"  # process is up but no progress and no excuse
+    else:
+        state = "stopped"
+    return {"alive": state in ("ok", "busy"), "state": state, "age_seconds": last_age, "consecutive_failures": failures}
 
 
 # ---------- readiness ----------
@@ -121,8 +204,9 @@ def alert_conditions(db: Session, now: datetime | None = None) -> list[Alert]:
             alerts.append(Alert(key, severity, message, count))
 
     ws = worker_status()
-    if not ws["alive"]:
-        alerts.append(Alert("worker_stopped", "critical", "The background worker has not completed a pass recently.", 1))
+    if ws["state"] in ("stopped", "stalled"):
+        what = "has stopped" if ws["state"] == "stopped" else "is running but making no progress"
+        alerts.append(Alert("worker_stopped", "critical", f"The background worker {what}.", 1))
     if ws["consecutive_failures"] >= WORKER_FAILURE_THRESHOLD:
         alerts.append(Alert("worker_failing", "critical", "The background worker is failing repeatedly.", ws["consecutive_failures"]))
 
@@ -155,6 +239,10 @@ def alert_conditions(db: Session, now: datetime | None = None) -> list[Alert]:
 
 # ---------- push notification (deduplicated) ----------
 
+class _DeliveryRejected(Exception):
+    def __init__(self, status):
+        self.status = status
+
 def notify(alerts: list[Alert]) -> int:
     """POST newly-firing alerts to ALERT_WEBHOOK_URL, each at most once per cooldown. Returns how many were sent."""
     cfg = get_settings()
@@ -169,12 +257,17 @@ def notify(alerts: list[Alert]) -> int:
         except Exception:  # noqa: BLE001
             continue
         try:
-            httpx.post(cfg.ALERT_WEBHOOK_URL, json={"text": f"[Atla {a.severity.upper()}] {a.message} (count: {a.count})"}, timeout=5.0)
+            resp = httpx.post(cfg.ALERT_WEBHOOK_URL, json={"text": f"[Atla {a.severity.upper()}] {a.message} (count: {a.count})"}, timeout=5.0)
+            code = getattr(resp, "status_code", None)
+            if not (isinstance(code, int) and 200 <= code < 300):
+                # 429, 5xx, 4xx and redirects are all failures: the alert did NOT reach anyone.
+                raise _DeliveryRejected(code)
             sent += 1
-        except Exception:  # noqa: BLE001 - never log the URL (it is a secret)
-            logger.error("ALERT could not be delivered to the alert webhook [%s]", a.key)
+        except Exception as e:  # noqa: BLE001 - never log the URL (it is a secret); class and status only
+            detail = f"status={e.status}" if isinstance(e, _DeliveryRejected) else f"error={type(e).__name__}"
+            logger.error("ALERT could not be delivered to the alert webhook [%s] %s", a.key, detail)
             try:
-                _redis.delete(f"atla:alert:{a.key}")  # retry on the next sweep
+                _redis.delete(f"atla:alert:{a.key}")  # a failed delivery must not suppress the retry
             except Exception:  # noqa: BLE001
                 pass
     return sent

@@ -44,15 +44,14 @@ async def handle_retell_webhook(
             max_skew_seconds=settings.RETELL_WEBHOOK_MAX_SKEW_SECONDS,
         )
     except InvalidRetellSignature as exc:
-        # The RESPONSE stays a bare 401 (don't tell an attacker why), but the reason is
-        # logged server-side so a misconfiguration is diagnosable. Never log the key itself:
-        # only its last 4 characters, enough to tell which key this process loaded.
+        # The RESPONSE stays a bare 401 (don't tell an attacker why), but the reason is logged server-side so a
+        # misconfiguration is diagnosable. NEVER log the key, any fragment of it, or the signature itself.
         logger.warning(
-            "Retell webhook rejected: %s | signature_header_present=%s body_bytes=%d api_key_last4=%s",
+            "Retell webhook rejected: %s | signature_header_present=%s body_bytes=%d api_key_configured=%s",
             exc,
             bool(x_retell_signature),
             len(raw_body),
-            (settings.RETELL_API_KEY or "")[-4:] or "<EMPTY - RETELL_API_KEY is not set>",
+            bool(settings.RETELL_API_KEY),
         )
         monitoring.count_event("webhook_rejected:retell")
         return Response(status_code=status.HTTP_401_UNAUTHORIZED)

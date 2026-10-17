@@ -3,6 +3,7 @@ Central settings. Everything privileged is read from the environment —
 nothing here is ever safe to hardcode or ship to the frontend.
 """
 from functools import lru_cache
+from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -101,7 +102,12 @@ class Settings(BaseSettings):
     ALERT_COOLDOWN_SECONDS: int = 6 * 3600
 
     # Paddle (billing) — server-side only
-    PADDLE_ENV: str = "sandbox"  # "sandbox" | "live"
+    # Selects the Paddle API host (sandbox-api.paddle.com vs api.paddle.com) in providers/billing. Any other value is
+    # rejected at start-up. The frontend has its OWN NEXT_PUBLIC_PADDLE_ENV: set both together (see docs).
+    PADDLE_ENV: Literal["sandbox", "live"] = "sandbox"
+    # A production deploy must say PADDLE_ENV explicitly, and "sandbox" in production needs this deliberate opt-in
+    # (a staged pilot). Otherwise production refuses to start.
+    ALLOW_SANDBOX_BILLING_IN_PRODUCTION: bool = False
     PADDLE_API_KEY: str = ""
     PADDLE_WEBHOOK_SECRET: str = ""
     PADDLE_STARTER_PRICE_ID: str = ""  # pri_...
@@ -147,6 +153,15 @@ class Settings(BaseSettings):
             value = getattr(self, name)
             if not value.startswith("https://"):
                 bad.append(f"{name} (must be an https:// URL)")
+        if "PADDLE_ENV" not in self.model_fields_set:
+            bad.append("PADDLE_ENV (must be set explicitly to 'live' or 'sandbox'; the default is not accepted in production)")
+        elif self.PADDLE_ENV == "sandbox" and not self.ALLOW_SANDBOX_BILLING_IN_PRODUCTION:
+            bad.append("PADDLE_ENV (is 'sandbox' in production; set ALLOW_SANDBOX_BILLING_IN_PRODUCTION=true only for a deliberate sandbox pilot)")
+        key = self.PADDLE_API_KEY
+        if self.PADDLE_ENV == "live" and "_sdbx_" in key:
+            bad.append("PADDLE_API_KEY (looks like a SANDBOX key but PADDLE_ENV is 'live')")
+        if self.PADDLE_ENV == "sandbox" and "_live_" in key:
+            bad.append("PADDLE_API_KEY (looks like a LIVE key but PADDLE_ENV is 'sandbox')")
         for name in (
             "RETELL_API_KEY", "PADDLE_API_KEY", "PADDLE_WEBHOOK_SECRET", "PADDLE_STARTER_PRICE_ID",
             "PADDLE_GROWTH_PRICE_ID", "TOKEN_ENCRYPTION_KEY", "SMTP_HOST",

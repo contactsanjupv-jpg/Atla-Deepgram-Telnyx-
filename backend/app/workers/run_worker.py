@@ -72,16 +72,21 @@ def run_once(phone_provider=None) -> dict:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    monitoring.mark_started()  # passes from a previous process stop counting; not "ready" until THIS one completes a pass
+    monitoring.start_liveness_thread()  # proves the process is alive while a slow sync or pass is running
     last_voice_sync = 0.0
     while True:
         if time.time() - last_voice_sync > VOICE_SYNC_SECONDS:
             try:
-                logger.info("Voice catalog synced: %s voices", sync_voice_catalog())
+                with monitoring.phase("voice_sync"):
+                    synced = sync_voice_catalog()
+                logger.info("Voice catalog synced: %s voices", synced)
                 last_voice_sync = time.time()
             except Exception:  # noqa: BLE001
                 logger.exception("Voice sync failed; will retry")
                 last_voice_sync = time.time() - VOICE_SYNC_SECONDS + 300
-        run_once()
+        with monitoring.phase("pass"):
+            run_once()
         time.sleep(LOOP_SECONDS)
 
 

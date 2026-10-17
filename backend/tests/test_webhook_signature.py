@@ -104,5 +104,5 @@ def test_a_rejected_webhook_is_a_bare_401_but_the_reason_is_logged_without_the_k
         "/webhooks/retell", content=b'{"event":"call_ended"}', headers={"x-retell-signature": f"v={ts},d={'0' * 64}"}
     )
     assert resp.status_code == 401 and resp.content == b""
-    assert "Signature mismatch" in caplog.text and "api_key_last4=9f3a" in caplog.text
-    assert "SUPERSECRET" not in caplog.text
+    assert "Signature mismatch" in caplog.text and "api_key_configured=True" in caplog.text
+    assert "SUPERSECRET" not in caplog.text and "9f3a" not in caplog.text and "last4" not in caplog.text

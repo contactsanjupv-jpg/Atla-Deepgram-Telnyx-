@@ -26,3 +26,8 @@ Status: **NOT VERIFIED** - no sandbox credentials have been provided; nothing be
 | 10 | Wrong webhook secret briefly | 401s; after 10/hour the `webhook_rejected_paddle` alert fires | |
 
 After each step compare against the assumptions list in docs/CANCELLATION_AND_REFUNDS.md and fix any that differ, with a regression test.
+
+
+## PADDLE_ENV safety
+`PADDLE_ENV` (backend) selects the API host: `sandbox` → `https://sandbox-api.paddle.com`, `live` → `https://api.paddle.com`. Only those two values are accepted (anything else fails at startup). With `ENV=production` the app refuses to start unless `PADDLE_ENV` is set explicitly, is `live` (or `sandbox` with `ALLOW_SANDBOX_BILLING_IN_PRODUCTION=true` for a deliberate sandbox pilot), and the API key does not look like the other environment's key (name-only error; the `pdl_sdbx_`/`pdl_live_` prefix check is a best-effort heuristic to confirm against Paddle's docs).
+The frontend has a separate `NEXT_PUBLIC_PADDLE_ENV` and client token that the backend cannot verify: set both together. A mismatch fails at checkout rather than charging.
