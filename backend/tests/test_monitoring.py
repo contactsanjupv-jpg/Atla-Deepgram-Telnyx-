@@ -234,3 +234,86 @@ def test_without_an_alert_webhook_nothing_is_sent_but_the_error_is_still_logged(
     with caplog.at_level(logging.ERROR):
         assert monitoring.notify([monitoring.Alert("webhook_dead", "critical", "x", 1)]) == 0
     assert "ALERT [critical] webhook_dead" in caplog.text
+
+
+# ---------------- real connection failures (no mocks on the client behaviour) ----------------
+
+def test_check_database_is_false_for_a_database_that_really_cannot_be_reached():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine("postgresql+psycopg://nobody:nopass@127.0.0.1:1/none", connect_args={"connect_timeout": 2})
+    session = sessionmaker(bind=engine)()
+    try:
+        assert monitoring.check_database(session) is False
+    finally:
+        session.close()
+
+
+def test_a_really_unreachable_redis_makes_ready_503_and_the_worker_look_dead(monkeypatch):
+    dead = redis_lib.Redis(host="127.0.0.1", port=1, socket_connect_timeout=1, decode_responses=True)
+    monkeypatch.setattr(monitoring, "_redis", dead)
+    assert monitoring.check_redis() is False
+    assert monitoring.worker_status()["alive"] is False
+    monitoring.record_worker_pass(failed=False)  # must not raise even though Redis is down
+    monitoring.count_event("webhook_rejected:retell")  # nor this
+    r = client.get("/health/ready")
+    assert r.status_code == 503 and r.json()["redis"] is False and r.json()["worker"] is False
+    assert monitoring.notify([monitoring.Alert("webhook_dead", "critical", "x", 1)]) == 0  # no crash, no send
+
+
+# ---------------- delivery, retry and the six-hour deduplication ----------------
+
+def test_the_dedupe_window_is_six_hours_and_a_still_firing_alert_is_announced_again_after_it(monkeypatch):
+    monkeypatch.setattr(get_settings(), "ALERT_WEBHOOK_URL", "https://hooks.example.com/x")
+    sent = []
+    monkeypatch.setattr(monitoring.httpx, "post", lambda u, json=None, timeout=None: sent.append(json))
+    alert = monitoring.Alert("provisioning_blocked_payment", "critical", "needs funding", 3)
+    assert monitoring.notify([alert]) == 1
+    ttl = monitoring._redis.ttl("atla:alert:provisioning_blocked_payment")
+    assert 6 * 3600 - 60 <= ttl <= 6 * 3600
+    assert monitoring.notify([alert]) == 0  # inside the window
+    monitoring._redis.delete("atla:alert:provisioning_blocked_payment")  # what Redis does when the 6 hours elapse
+    assert monitoring.notify([alert]) == 1 and len(sent) == 2  # condition persists in the DB, so it is announced again
+
+
+def test_an_unreachable_alert_webhook_is_retried_by_every_sweep_until_it_works(monkeypatch):
+    monkeypatch.setattr(get_settings(), "ALERT_WEBHOOK_URL", "https://hooks.example.com/x")
+    state = {"up": False, "attempts": 0}
+
+    def post(u, json=None, timeout=None):
+        state["attempts"] += 1
+        if not state["up"]:
+            raise ConnectionError("unreachable")
+
+    monkeypatch.setattr(monitoring.httpx, "post", post)
+    db = SessionLocal()
+    try:
+        monitoring._redis.delete("atla:monitoring:sweep")
+        assert monitoring.sweep(db) == 0  # worker_stopped fires, delivery fails
+        monitoring._redis.delete("atla:monitoring:sweep")
+        assert monitoring.sweep(db) == 0 and state["attempts"] >= 2  # retried on the next sweep, not forgotten
+        state["up"] = True
+        monitoring._redis.delete("atla:monitoring:sweep")
+        assert monitoring.sweep(db) >= 1  # delivered as soon as the webhook is back
+    finally:
+        db.close()
+
+
+def test_the_sweep_runs_at_most_once_a_minute():
+    db = SessionLocal()
+    try:
+        monitoring._redis.delete("atla:monitoring:sweep")
+        monitoring.sweep(db)
+        assert monitoring.sweep(db) == 0
+    finally:
+        db.close()
+
+
+def test_monitoring_failures_never_break_webhook_processing(monkeypatch):
+    """Counters are best-effort: a Redis outage must not turn a rejected/failed webhook response into a crash."""
+    dead = redis_lib.Redis(host="127.0.0.1", port=1, socket_connect_timeout=1, decode_responses=True)
+    monkeypatch.setattr(monitoring, "_redis", dead)
+    monkeypatch.setattr(get_settings(), "RETELL_API_KEY", "some-key")
+    assert client.post("/webhooks/retell", content=b"{}", headers={"X-Retell-Signature": "v=1,d=ab"}).status_code == 401
+    assert client.post("/webhooks/paddle", content=b"{}", headers={"Paddle-Signature": "ts=1;h1=bad"}).status_code == 401
