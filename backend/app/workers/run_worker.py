@@ -96,3 +96,7 @@ def main() -> None:
             dog.leave()
         monitoring.publish_config_fingerprint("worker")
         time.sleep(LOOP_SECONDS)
+
+
+if __name__ == "__main__":
+    main()
