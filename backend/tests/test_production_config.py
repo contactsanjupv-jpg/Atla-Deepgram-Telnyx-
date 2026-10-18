@@ -1,4 +1,7 @@
 """A production deploy must refuse to start with weak, missing or non-https configuration. Values are never reported."""
+import pytest
+from pydantic import ValidationError
+
 from app.config import Settings
 
 GOOD = dict(
@@ -7,6 +10,34 @@ GOOD = dict(
     PADDLE_ENV="live", RETELL_API_KEY="k", PADDLE_API_KEY="k", PADDLE_WEBHOOK_SECRET="s", PADDLE_STARTER_PRICE_ID="pri_1",
     PADDLE_GROWTH_PRICE_ID="pri_2", TOKEN_ENCRYPTION_KEY="t", SMTP_HOST="smtp.example.com",
 )
+
+
+# Minimum valid configuration for building a Settings in a test. Clearly fake, test-only values; never a real
+# secret or database. Every Settings(...) below goes through _plain()/_settings() so no test depends on a developer's
+# .env or exported variables (`_env_file=None` ignores the .env file, so these must be supplied explicitly).
+MINIMAL = dict(
+    APP_SECRET_KEY="test-only-fake-secret-key-0000000000000000",
+    DATABASE_URL="postgresql+psycopg://test_user:test_pass@localhost:5432/atla_test",
+)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_environment(monkeypatch):
+    """Variables a developer may have exported must not change what these tests assert (defaults, 'explicitly set')."""
+    for name in ("ENV", "PADDLE_ENV", "ALLOW_SANDBOX_BILLING_IN_PRODUCTION", "PAST_DUE_GRACE_DAYS", "NUMBER_RELEASE_DELAY_DAYS"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _plain(**over):
+    return Settings(_env_file=None, **{**MINIMAL, **over})
+
+
+def _rejected_fields(**over) -> set[str]:
+    """The settings a Settings(...) refuses. Asserting the field name keeps a rejection test from passing for the
+    wrong reason (e.g. a missing mandatory setting)."""
+    with pytest.raises(ValidationError) as e:
+        _plain(**over)
+    return {str(err["loc"][0]) for err in e.value.errors()}
 
 
 def _settings(**over):
@@ -46,16 +77,12 @@ def test_the_app_refuses_to_start_in_production_with_bad_config():
 
 # ---------------- Paddle environment safety ----------------
 
-import pytest
-from pydantic import ValidationError
-
 
 def test_paddle_env_defaults_to_sandbox_outside_production_and_accepts_only_the_two_values():
-    assert Settings(_env_file=None).PADDLE_ENV == "sandbox"
-    assert Settings(_env_file=None, PADDLE_ENV="live").PADDLE_ENV == "live"
+    assert _plain().PADDLE_ENV == "sandbox"
+    assert _plain(PADDLE_ENV="live").PADDLE_ENV == "live"
     for bad in ("prod", "production", "Live ", "", "SANDBOX"):
-        with pytest.raises(ValidationError):
-            Settings(_env_file=None, PADDLE_ENV=bad)
+        assert _rejected_fields(PADDLE_ENV=bad) == {"PADDLE_ENV"}, bad
 
 
 def test_production_with_live_paddle_is_accepted():
@@ -64,7 +91,7 @@ def test_production_with_live_paddle_is_accepted():
 
 def test_production_must_set_paddle_env_explicitly():
     good = {k: v for k, v in GOOD.items() if k != "PADDLE_ENV"}
-    problems = Settings(_env_file=None, **good).production_config_problems()
+    problems = Settings(_env_file=None, **good).production_config_problems()  # GOOD carries APP_SECRET_KEY and DATABASE_URL
     assert len(problems) == 1 and problems[0].startswith("PADDLE_ENV")
 
 
@@ -94,10 +121,10 @@ def test_the_provider_selects_the_api_host_from_paddle_env_and_never_guesses(mon
 
     assert mod._BASE_URLS == {"sandbox": "https://sandbox-api.paddle.com", "live": "https://api.paddle.com"}
     for env, host in mod._BASE_URLS.items():
-        monkeypatch.setattr(mod, "get_settings", lambda env=env: Settings(_env_file=None, PADDLE_ENV=env, PADDLE_API_KEY="k"))
+        monkeypatch.setattr(mod, "get_settings", lambda env=env: _plain(PADDLE_ENV=env, PADDLE_API_KEY="k"))
         assert mod.PaddleBillingProvider()._base_url == host
     # a value that bypassed validation still cannot silently pick a host
-    bogus = Settings(_env_file=None, PADDLE_API_KEY="k")
+    bogus = _plain(PADDLE_API_KEY="k")
     object.__setattr__(bogus, "PADDLE_ENV", "prod")
     monkeypatch.setattr(mod, "get_settings", lambda: bogus)
     with pytest.raises(RuntimeError, match="PADDLE_ENV"):
@@ -108,21 +135,21 @@ def test_the_provider_selects_the_api_host_from_paddle_env_and_never_guesses(mon
 
 def test_env_accepts_only_the_documented_environments():
     for ok in ("development", "test", "production"):
-        assert Settings(_env_file=None, ENV=ok).ENV == ok
+        assert _plain(ENV=ok).ENV == ok
     for bad in ("prod", "Production", "PRODUCTION", "staging", "live", "", " production", "production "):
-        with pytest.raises(ValidationError):
-            Settings(_env_file=None, ENV=bad)
+        assert _rejected_fields(ENV=bad) == {"ENV"}, bad
 
 
 def test_a_mistyped_env_fails_startup_instead_of_disabling_the_production_guard(monkeypatch):
-    monkeypatch.setenv("ENV", "prod")
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None)
+    monkeypatch.setenv("ENV", "prod")  # as if exported in the deployment environment
+    with pytest.raises(ValidationError) as e:
+        _plain()
+    assert {str(err["loc"][0]) for err in e.value.errors()} == {"ENV"}
 
 
 def test_the_test_and_development_configurations_still_load_without_env():
-    assert Settings(_env_file=None).ENV == "development"
-    assert Settings(_env_file=None, ENV="test").is_production is False
+    assert _plain().ENV == "development"
+    assert _plain(ENV="test").is_production is False
 
 
 # ---------------- one guard for the API and the worker ----------------
@@ -141,7 +168,7 @@ def test_the_same_guard_runs_in_the_api_and_the_worker_and_names_only_settings()
 
 
 def test_non_production_never_blocks_startup_and_a_good_production_config_passes():
-    Settings(_env_file=None, ENV="development", APP_SECRET_KEY="short").assert_startup_safe("worker")
+    _plain(ENV="development", APP_SECRET_KEY="short").assert_startup_safe("worker")
     _settings().assert_startup_safe("worker")
 
 
