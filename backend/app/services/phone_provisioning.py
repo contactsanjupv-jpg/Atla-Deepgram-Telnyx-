@@ -163,14 +163,20 @@ def reconcile_provisioning(
     return settled
 
 
-def release_number(db: Session, phone: PhoneNumber, provider: PhoneProvider) -> None:
-    """Release at the provider (idempotent) and reflect it locally. Safe to retry."""
+RELEASED_BY_ENTITLEMENT = "released_by=entitlement"
+
+
+def release_number(db: Session, phone: PhoneNumber, provider: PhoneProvider, reason: str = "customer") -> None:
+    """Release at the provider (idempotent) and reflect it locally. Safe to retry.
+    `reason` is kept on the provisioning row: only a release caused by a lapsed subscription ("entitlement") may be
+    re-provisioned automatically when the subscription becomes active again. A release the customer asked for, or one
+    made when the account was deleted, never buys a replacement by itself."""
     provider.release_number(phone.retell_phone_number_id)
     agent_id = phone.agent_id
     phone.status, phone.agent_id = PhoneNumberStatus.released, None
     prov = db.query(PhoneProvisioning).filter(PhoneProvisioning.organization_id == phone.organization_id).first()
     if prov is not None and prov.phone_number_id == phone.id:
-        prov.status = "released"
+        prov.status, prov.last_error = "released", f"released_by={reason}"
     if agent_id is not None:
         agent = db.get(Agent, agent_id)
         if agent is not None and agent.status == AgentStatus.active:

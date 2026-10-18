@@ -23,3 +23,7 @@ number is gone: a returning customer is given a different number (their printed/
 ## Decide before production
 1. Grace days for failed payments. 2. How long to hold a suspended customer's number. 3. Whether customers are told (email) when service is about to pause.
 There is currently no email notification for `past_due` (only the dashboard banner).
+
+
+## Re-subscribing after the number was released
+When the lapse sweep releases a number and the subscription later becomes `active` again, the automatic provisioning sweep buys a replacement under a NEW provisioning generation (new nickname), under the same per-org lock and uniqueness rules: it never buys while an active number exists and adopts any purchase still `purchasing`/`ambiguous` instead of re-buying. Only releases caused by the lapse sweep are re-armed (`last_error = released_by=entitlement`); a release the customer asked for, or one from account deletion, is never replaced automatically. Rows released before this change carry no marker and are not re-armed (they can still be bought manually). The replacement number is a new number. Grace and release-delay defaults are unchanged.

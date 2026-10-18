@@ -31,3 +31,9 @@ After each step compare against the assumptions list in docs/CANCELLATION_AND_RE
 ## PADDLE_ENV safety
 `PADDLE_ENV` (backend) selects the API host: `sandbox` → `https://sandbox-api.paddle.com`, `live` → `https://api.paddle.com`. Only those two values are accepted (anything else fails at startup). With `ENV=production` the app refuses to start unless `PADDLE_ENV` is set explicitly, is `live` (or `sandbox` with `ALLOW_SANDBOX_BILLING_IN_PRODUCTION=true` for a deliberate sandbox pilot), and the API key does not look like the other environment's key (name-only error; the `pdl_sdbx_`/`pdl_live_` prefix check is a best-effort heuristic to confirm against Paddle's docs).
 The frontend has a separate `NEXT_PUBLIC_PADDLE_ENV` and client token that the backend cannot verify: set both together. A mismatch fails at checkout rather than charging.
+
+## Environment consistency (backend is authoritative)
+- `ENV` must be `development`, `test` or `production`; anything else fails startup (it used to silently disable the production guards).
+- The API **and the worker** run the same production guard at startup and refuse to start on an unsafe configuration. Both publish a non-secret fingerprint (environment, Paddle mode, URLs, database host/name, price ids, lapse policy); a difference raises the `config_mismatch` alert.
+- `GET /api/v1/public-config` returns `{"paddle_env": "sandbox"|"live"}` (no secrets). The frontend opens Paddle checkout in THAT environment and refuses to open it if its `NEXT_PUBLIC_PADDLE_CLIENT_TOKEN` does not match: `test_` for sandbox, `live_` for live (prefixes per Paddle's Paddle.js docs). `NEXT_PUBLIC_PADDLE_ENV` is no longer used.
+- Still to verify in the sandbox: what Paddle.js does when token and environment disagree (undocumented; ours refuses before calling it).

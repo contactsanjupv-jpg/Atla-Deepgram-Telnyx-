@@ -77,7 +77,7 @@ def enforce_entitlements(
             db.commit()
             if now >= since + timedelta(days=settings.NUMBER_RELEASE_DELAY_DAYS):
                 for phone in db.query(PhoneNumber).filter(PhoneNumber.organization_id == org_id, PhoneNumber.status == PhoneNumberStatus.active).all():
-                    release_number(db, phone, provider)
+                    release_number(db, phone, provider, reason="entitlement")
                     result["released"] += 1
         except Exception:  # noqa: BLE001
             db.rollback()

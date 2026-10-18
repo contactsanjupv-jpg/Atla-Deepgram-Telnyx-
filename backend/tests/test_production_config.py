@@ -37,23 +37,11 @@ def test_each_unsafe_setting_is_reported_by_name_only():
 
 
 def test_the_app_refuses_to_start_in_production_with_bad_config():
-    import importlib
-    import sys
-
     import pytest
 
-    import app.main as main
-
     bad = _settings(RETELL_API_KEY="", FRONTEND_URL="http://x")
-    saved = main.settings
-    try:
-        main.settings = bad
-        src = open(main.__file__).read()
-        guard = src[src.index("if settings.is_production:"):src.index("app = FastAPI(")]
-        with pytest.raises(RuntimeError, match="Unsafe production configuration"):
-            exec(compile(guard, "guard", "exec"), {"settings": bad})
-    finally:
-        main.settings = saved
+    with pytest.raises(RuntimeError, match=r"Unsafe production configuration \(api\)"):
+        bad.assert_startup_safe("api")
 
 
 # ---------------- Paddle environment safety ----------------
@@ -114,3 +102,111 @@ def test_the_provider_selects_the_api_host_from_paddle_env_and_never_guesses(mon
     monkeypatch.setattr(mod, "get_settings", lambda: bogus)
     with pytest.raises(RuntimeError, match="PADDLE_ENV"):
         mod.PaddleBillingProvider()
+
+
+# ---------------- ENV is strict ----------------
+
+def test_env_accepts_only_the_documented_environments():
+    for ok in ("development", "test", "production"):
+        assert Settings(_env_file=None, ENV=ok).ENV == ok
+    for bad in ("prod", "Production", "PRODUCTION", "staging", "live", "", " production", "production "):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, ENV=bad)
+
+
+def test_a_mistyped_env_fails_startup_instead_of_disabling_the_production_guard(monkeypatch):
+    monkeypatch.setenv("ENV", "prod")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_the_test_and_development_configurations_still_load_without_env():
+    assert Settings(_env_file=None).ENV == "development"
+    assert Settings(_env_file=None, ENV="test").is_production is False
+
+
+# ---------------- one guard for the API and the worker ----------------
+
+def test_the_same_guard_runs_in_the_api_and_the_worker_and_names_only_settings():
+    import pytest
+
+    bad = _settings(APP_SECRET_KEY="short-secret-VALUE", RETELL_API_KEY="")
+    messages = []
+    for process in ("api", "worker"):
+        with pytest.raises(RuntimeError) as e:
+            bad.assert_startup_safe(process)
+        messages.append(str(e.value))
+    assert messages[0].replace("(api)", "(worker)") == messages[1]
+    assert "APP_SECRET_KEY" in messages[0] and "RETELL_API_KEY" in messages[0] and "short-secret-VALUE" not in messages[0]
+
+
+def test_non_production_never_blocks_startup_and_a_good_production_config_passes():
+    Settings(_env_file=None, ENV="development", APP_SECRET_KEY="short").assert_startup_safe("worker")
+    _settings().assert_startup_safe("worker")
+
+
+def test_both_entry_points_call_the_guard_before_doing_anything():
+    import inspect
+
+    import app.main as main
+    from app.workers import run_worker
+
+    assert 'assert_startup_safe("api")' in inspect.getsource(main)
+    src = inspect.getsource(run_worker.main)
+    assert 'assert_startup_safe("worker")' in src and src.index("assert_startup_safe") < src.index("mark_started")
+
+
+# ---------------- API and worker must resolve the same environment ----------------
+
+def test_the_config_fingerprint_changes_with_any_environment_difference_and_ignores_secrets():
+    base = _settings().config_fingerprint()
+    assert base == _settings().config_fingerprint() and len(base) == 16
+    for over in (dict(PADDLE_ENV="sandbox", ALLOW_SANDBOX_BILLING_IN_PRODUCTION=True), dict(FRONTEND_URL="https://other.example.com"),
+                 dict(BACKEND_PUBLIC_URL="https://api2.example.com"), dict(DATABASE_URL="postgresql+psycopg://u:p@h/other"),
+                 dict(PADDLE_STARTER_PRICE_ID="pri_other"), dict(PAST_DUE_GRACE_DAYS=9)):
+        assert _settings(**over).config_fingerprint() != base, over
+    # credentials and passwords are not part of it
+    assert _settings(PADDLE_API_KEY="another", DATABASE_URL="postgresql+psycopg://u:different@h/db").config_fingerprint() == base
+
+
+def test_a_config_mismatch_between_api_and_worker_raises_a_critical_alert():
+    from app.services import monitoring
+
+    r = monitoring._redis
+    r.delete("atla:config:api", "atla:config:worker")
+    assert monitoring.config_mismatch() is False
+    r.set("atla:config:api", "aaaa")
+    assert monitoring.config_mismatch() is False  # one side unknown is not a mismatch
+    r.set("atla:config:worker", "aaaa")
+    assert monitoring.config_mismatch() is False
+    r.set("atla:config:worker", "bbbb")
+    assert monitoring.config_mismatch() is True
+    r.delete("atla:config:api", "atla:config:worker")
+
+
+def test_publishing_stores_this_processs_fingerprint():
+    from app.config import get_settings
+    from app.services import monitoring
+
+    monitoring.publish_config_fingerprint("api")
+    monitoring.publish_config_fingerprint("worker")
+    assert monitoring._redis.get("atla:config:api") == get_settings().config_fingerprint() == monitoring._redis.get("atla:config:worker")
+    assert monitoring.config_mismatch() is False
+    monitoring._redis.delete("atla:config:api", "atla:config:worker")
+
+
+# ---------------- backend-authoritative Paddle environment for the browser ----------------
+
+def test_the_public_config_endpoint_reports_the_backend_environment_and_nothing_secret(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.config import get_settings
+    from app.main import app
+
+    c = TestClient(app)
+    for env in ("sandbox", "live"):
+        monkeypatch.setattr(get_settings(), "PADDLE_ENV", env)
+        monkeypatch.setattr(get_settings(), "PADDLE_API_KEY", "pdl_live_apikey_SECRET")
+        r = c.get("/api/v1/public-config")
+        assert r.status_code == 200 and r.json() == {"paddle_env": env}
+        assert "SECRET" not in r.text

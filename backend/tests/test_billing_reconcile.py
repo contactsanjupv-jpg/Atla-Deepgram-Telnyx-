@@ -150,3 +150,63 @@ def test_duplicate_active_subscriptions_are_flagged_and_only_cancelled_on_apply(
     assert paddle.cancelled == [(second, False)]  # the NEWER one, at period end
     reconcile_subscriptions(db, paddle, apply=True)
     assert paddle.cancelled == [(second, False)]  # idempotent: not requested twice
+
+# ---------- the scheduled job wrapper (workers/background_jobs.billing_reconcile_job) ----------
+
+def _run_job(monkeypatch, fake):
+    import json
+
+    from app.services import monitoring
+    from app.workers import background_jobs
+    from app.providers.billing import paddle_billing_provider as mod
+
+    monkeypatch.setattr(mod, "PaddleBillingProvider", lambda: fake)
+    background_jobs.billing_reconcile_job()
+    return json.loads(monitoring.job_get("billing_reconcile", "report"))
+
+
+def test_the_scheduled_job_repairs_drift_and_publishes_counts_only(db, monkeypatch):
+    _c, org = _new_org()
+    sid = f"sub_{uuid.uuid4().hex[:12]}"
+    _post(_ev("subscription.created", sid, org, "pri_starter"))
+    summary = _run_job(monkeypatch, FakePaddle({sid: _snapshot(sid, org, status="past_due")}))
+    assert _fresh(db, sid).status == "past_due" and summary["drift_repaired"] >= 1
+    assert set(summary) == {"checked", "drift_repaired", "drift_unresolved", "missing_at_paddle", "read_errors", "duplicate_active_orgs"}
+    assert all(isinstance(v, int) for v in summary.values())  # no ids, no field values leave the job
+
+
+def test_the_scheduled_job_leaves_a_subscription_missing_at_paddle_untouched_and_counts_it(db, monkeypatch):
+    _c, org = _new_org()
+    sid = f"sub_{uuid.uuid4().hex[:12]}"
+    _post(_ev("subscription.created", sid, org, "pri_starter"))
+    summary = _run_job(monkeypatch, FakePaddle({}))  # Paddle knows nothing of it
+    assert _fresh(db, sid).status == "active" and summary["missing_at_paddle"] >= 1
+
+
+def test_a_snapshot_of_a_different_subscription_is_never_applied(db, monkeypatch):
+    _c, org = _new_org()
+    sid = f"sub_{uuid.uuid4().hex[:12]}"
+    _post(_ev("subscription.created", sid, org, "pri_starter"))
+    wrong = _snapshot("sub_someone_else", org, status="canceled")
+    summary = _run_job(monkeypatch, FakePaddle({sid: wrong}))
+    assert _fresh(db, sid).status == "active" and summary["read_errors"] >= 1
+
+
+def test_a_stale_paddle_snapshot_cannot_move_newer_local_state_and_a_canceled_row_is_not_resurrected(db, monkeypatch):
+    _c, org = _new_org()
+    sid = f"sub_{uuid.uuid4().hex[:12]}"
+    _post(_ev("subscription.created", sid, org, "pri_starter"))
+    _post(_ev("subscription.canceled", sid, org, "pri_starter", status="canceled", at="2026-10-02T00:00:00.000000Z"))
+    assert _fresh(db, sid).status == "canceled"
+    _run_job(monkeypatch, FakePaddle({sid: _snapshot(sid, org, status="active", updated_at="2020-01-01T00:00:00Z")}))
+    assert _fresh(db, sid).status == "canceled"  # terminal rows are excluded; stale snapshots are ignored
+
+
+def test_running_the_scheduled_job_twice_changes_nothing_the_second_time(db, monkeypatch):
+    _c, org = _new_org()
+    sid = f"sub_{uuid.uuid4().hex[:12]}"
+    _post(_ev("subscription.created", sid, org, "pri_starter"))
+    fake = FakePaddle({sid: _snapshot(sid, org, status="past_due")})
+    first = _run_job(monkeypatch, fake)
+    second = _run_job(monkeypatch, fake)
+    assert first["drift_repaired"] >= 1 and second["drift_repaired"] == 0

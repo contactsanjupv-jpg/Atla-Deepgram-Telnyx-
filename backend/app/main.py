@@ -12,6 +12,8 @@ from app.api.v1.voices import router as voices_router
 from app.config import get_settings
 from app.core.error_handling import unhandled_exception_handler
 from app.core.security_headers import SecurityHeadersMiddleware
+from app.services import monitoring
+from app.api.v1.public_config import router as public_config_router
 from app.webhooks.retell import router as retell_webhook_router
 from app.api.v1.account import router as account_router
 from app.api.v1.analytics import router as analytics_router
@@ -27,10 +29,8 @@ from app.webhooks.paddle import router as paddle_webhook_router
 
 settings = get_settings()
 
-if settings.is_production:
-    _problems = settings.production_config_problems()
-    if _problems:  # fail at start-up, not on the first customer request
-        raise RuntimeError("Unsafe production configuration: " + "; ".join(_problems))
+settings.assert_startup_safe("api")  # fail at start-up, not on the first customer request (the worker runs the same check)
+monitoring.publish_config_fingerprint("api")  # best effort: lets monitoring notice an API/worker configuration mismatch
 
 app = FastAPI(title="Atla API", version="0.1.0", docs_url=None if settings.is_production else "/docs")
 
@@ -64,6 +64,7 @@ app.include_router(analytics_router)
 app.include_router(dashboard_router)
 app.include_router(onboarding_router)
 app.include_router(account_router)
+app.include_router(public_config_router)
 
 
 @app.get("/health")

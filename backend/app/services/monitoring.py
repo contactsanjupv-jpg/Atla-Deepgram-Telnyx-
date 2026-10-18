@@ -70,19 +70,23 @@ def counter(name: str) -> int:
 
 
 # ---------- worker heartbeat ----------
-# Three signals, so a SLOW worker is not mistaken for a DEAD one:
+# Signals, so a SLOW worker is not mistaken for a DEAD one and a STUCK one is not mistaken for a slow one:
 #   last_pass  - written when a full pass completes (proves the loop is making progress);
-#   liveness   - written every 10 s by a background thread (proves the process is up, even inside a long operation);
-#   phase      - "name|start" while a known long operation runs (voice sync, a pass), bounded by PHASE_MAX_SECONDS.
+#   liveness   - written every 10 s by the WATCHDOG thread, and ONLY while the main loop is within its time budget
+#                (workers/watchdog.py). A stuck main loop therefore stops the beat itself, and the process exits;
+#   phase      - "name|start|budget" while the main loop runs a bounded operation (a pass). Its budget, not a global
+#                constant, decides how long it may keep the worker "busy".
 # started_at invalidates passes recorded by a previous process, so readiness is never reported before THIS process
-# has completed its first pass.
+# has completed its first pass. Slow, non-urgent jobs (voice sync, subscription reconciliation) do NOT run in the
+# main loop any more; they have their own state below (background jobs) and never affect worker readiness.
 LIVENESS_KEY = "atla:worker:liveness"
 STARTED_KEY = "atla:worker:started_at"
 PHASE_KEY = "atla:worker:phase"
+WATCHDOG_EXIT_KEY = "atla:worker:watchdog_exit"
 LIVENESS_INTERVAL_SECONDS = 10
 LIVENESS_STALE_SECONDS = 45
-PHASE_MAX_SECONDS = 900  # a long operation is tolerated this long; beyond it the worker counts as stalled
-STARTUP_GRACE_SECONDS = 900  # time allowed for the first pass (incl. the initial voice-catalog sync)
+PHASE_MAX_SECONDS = 300  # default budget of a phase; the worker passes WORKER_PASS_BUDGET_SECONDS
+STARTUP_GRACE_SECONDS = 420  # first pass: one pass budget plus a loop interval and a margin
 
 
 def record_worker_pass(failed: bool) -> None:
@@ -90,9 +94,10 @@ def record_worker_pass(failed: bool) -> None:
         _redis.set(HEARTBEAT_KEY, str(time.time()), ex=3600)
         if failed:
             _redis.incr(FAILURES_KEY)
+            _redis.expire(FAILURES_KEY, 3600)
         else:
             _redis.delete(FAILURES_KEY)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - the heartbeat is best effort; the worker must keep working
         logger.error("ALERT could not record the worker heartbeat (Redis unreachable)")
 
 
@@ -112,23 +117,19 @@ def mark_started() -> None:
     beat()
 
 
-def start_liveness_thread(interval: float = LIVENESS_INTERVAL_SECONDS) -> threading.Event:
-    """Daemon thread that proves the process is alive while the main loop is inside a long operation."""
-    stop = threading.Event()
-
-    def loop():
-        while not stop.wait(interval):
-            beat()
-
-    threading.Thread(target=loop, name="atla-worker-liveness", daemon=True).start()
-    return stop
+def record_watchdog_exit(phase_name: str) -> None:
+    """The watchdog is about to kill a stalled worker; the NEXT worker process announces it (the dead one cannot)."""
+    try:
+        _redis.set(WATCHDOG_EXIT_KEY, f"{phase_name}|{time.time()}", ex=3600)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @contextmanager
-def phase(name: str):
-    """Marks a long-running operation so it is not mistaken for a stall (bounded by PHASE_MAX_SECONDS)."""
+def phase(name: str, budget_seconds: int = PHASE_MAX_SECONDS):
+    """Marks a bounded operation so it is not mistaken for a stall, for at most `budget_seconds`."""
     try:
-        _redis.set(PHASE_KEY, f"{name}|{time.time()}", ex=PHASE_MAX_SECONDS + 60)
+        _redis.set(PHASE_KEY, f"{name}|{time.time()}|{budget_seconds}", ex=budget_seconds + 60)
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -155,17 +156,20 @@ def worker_status(now: float | None = None) -> dict:
         last_t = None  # a pass from before this process started proves nothing about it
     liveness_fresh = bool(live) and now - float(live) <= LIVENESS_STALE_SECONDS
     last_age = None if last_t is None else max(now - last_t, 0.0)
-    phase_age = None
+    phase_age, phase_budget = None, PHASE_MAX_SECONDS
     if ph and "|" in ph:
+        fields = ph.split("|")
         try:
-            phase_age = max(now - float(ph.split("|", 1)[1]), 0.0)
-        except ValueError:
+            phase_age = max(now - float(fields[1]), 0.0)
+            if len(fields) > 2:
+                phase_budget = float(fields[2])
+        except (ValueError, IndexError):
             phase_age = None
 
     if last_age is not None and last_age <= WORKER_STALE_SECONDS:
         state = "ok"
-    elif liveness_fresh and last_t is not None and phase_age is not None and phase_age <= PHASE_MAX_SECONDS:
-        state = "busy"  # was operational, now inside a known long operation, process demonstrably alive
+    elif liveness_fresh and last_t is not None and phase_age is not None and phase_age <= phase_budget:
+        state = "busy"  # was operational, now inside a bounded operation, process demonstrably alive
     elif liveness_fresh and last_t is None and started_t is not None and now - started_t <= STARTUP_GRACE_SECONDS:
         state = "starting"  # up, but has not completed its first pass: NOT ready yet, and not an alarm yet
     elif liveness_fresh:
@@ -173,6 +177,57 @@ def worker_status(now: float | None = None) -> dict:
     else:
         state = "stopped"
     return {"alive": state in ("ok", "busy"), "state": state, "age_seconds": last_age, "consecutive_failures": failures}
+
+
+# ---------- background jobs (voice sync, subscription reconciliation) ----------
+# Each job records when it last started, finished and succeeded, so a job that hangs or keeps failing is visible
+# without ever being able to make the worker look dead (or alive).
+
+JOB_KEY = "atla:job:{name}:{field}"
+JOB_HARD_BUDGET_SECONDS = {"voice_sync": 900, "billing_reconcile": 1800}
+
+
+def _job_interval(name: str) -> int:
+    cfg = get_settings()
+    return {"voice_sync": cfg.VOICE_SYNC_INTERVAL_SECONDS, "billing_reconcile": cfg.BILLING_RECONCILE_INTERVAL_SECONDS}[name]
+
+
+def job_record(name: str, field: str, value: str, ex: int = 7 * 86400) -> None:
+    try:
+        _redis.set(JOB_KEY.format(name=name, field=field), value, ex=ex)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def job_get(name: str, field: str) -> str | None:
+    try:
+        return _redis.get(JOB_KEY.format(name=name, field=field))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def job_failure_count(name: str) -> int:
+    return int(job_get(name, "failures") or 0)
+
+
+# ---------- configuration consistency (API vs worker) ----------
+
+CONFIG_KEY = "atla:config:{role}"
+
+
+def publish_config_fingerprint(role: str) -> None:
+    try:
+        _redis.set(CONFIG_KEY.format(role=role), get_settings().config_fingerprint(), ex=7 * 86400)
+    except Exception:  # noqa: BLE001 - best effort; Redis may not be up yet
+        pass
+
+
+def config_mismatch() -> bool:
+    try:
+        api, worker = _redis.get(CONFIG_KEY.format(role="api")), _redis.get(CONFIG_KEY.format(role="worker"))
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(api and worker and api != worker)
 
 
 # ---------- readiness ----------
@@ -210,6 +265,12 @@ def alert_conditions(db: Session, now: datetime | None = None) -> list[Alert]:
     if ws["consecutive_failures"] >= WORKER_FAILURE_THRESHOLD:
         alerts.append(Alert("worker_failing", "critical", "The background worker is failing repeatedly.", ws["consecutive_failures"]))
 
+    if config_mismatch():
+        alerts.append(Alert("config_mismatch", "critical", "The API and the worker are running with different environment settings (environment, Paddle mode, URLs, database or price ids).", 1))
+    if _redis_get(WATCHDOG_EXIT_KEY):
+        alerts.append(Alert("worker_watchdog_restart", "warning", "The worker stalled and was restarted by its watchdog.", 1))
+    alerts.extend(_job_alerts(now))
+
     for source in ("paddle", "retell"):
         n = counter(f"webhook_rejected:{source}")
         add(f"webhook_rejected_{source}", "critical", f"{source.title()} webhooks are being rejected (signature/secret misconfigured?).", n if n >= WEBHOOK_REJECTION_THRESHOLD else 0)
@@ -235,6 +296,48 @@ def alert_conditions(db: Session, now: datetime | None = None) -> list[Alert]:
     add("refund_pending_approval", "warning", "Refunds have waited for Paddle approval for over 48 hours.",
         refunds.filter(RefundRequest.status == "submitted", RefundRequest.updated_at <= now - timedelta(hours=REFUND_PENDING_HOURS)).count())
     return alerts
+
+
+def _redis_get(key: str):
+    try:
+        return _redis.get(key)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _job_alerts(now: datetime) -> list[Alert]:
+    """Voice sync is cosmetic-ish (alert only when long overdue); billing reconciliation protects revenue."""
+    out: list[Alert] = []
+    ts = now.timestamp()
+    started = _redis_get(STARTED_KEY)
+    for name, label in (("voice_sync", "Voice catalog sync"), ("billing_reconcile", "Paddle subscription reconciliation")):
+        interval = _job_interval(name)
+        began, finished = job_get(name, "last_start"), job_get(name, "last_finish")
+        if began and (not finished or float(finished) < float(began)) and ts - float(began) > JOB_HARD_BUDGET_SECONDS[name]:
+            out.append(Alert(f"job_stalled_{name}", "critical" if name == "billing_reconcile" else "warning", f"{label} has been running far longer than allowed.", 1))
+        last_ok = job_get(name, "last_success")
+        reference = float(last_ok) if last_ok else (float(started) if started else None)
+        if reference is not None and ts - reference > 3 * interval + JOB_HARD_BUDGET_SECONDS[name]:
+            out.append(Alert(f"job_overdue_{name}", "critical" if name == "billing_reconcile" else "warning", f"{label} has not succeeded for over three intervals.", 1))
+        fails = job_failure_count(name)
+        if fails >= 2:
+            out.append(Alert(f"job_failing_{name}", "critical" if name == "billing_reconcile" else "warning", f"{label} is failing repeatedly.", fails))
+    import json
+
+    raw = _redis_get(JOB_KEY.format(name="billing_reconcile", field="report"))
+    if raw:
+        try:
+            r = json.loads(raw)
+        except ValueError:
+            r = {}
+        unresolved = int(r.get("drift_unresolved", 0)) + int(r.get("missing_at_paddle", 0)) + int(r.get("duplicate_active_orgs", 0))
+        if unresolved:
+            out.append(Alert("billing_drift_unresolved", "critical", "Subscriptions differ from Paddle and could not be repaired automatically (or are missing at Paddle): manual review needed.", unresolved))
+        if int(r.get("drift_repaired", 0)):
+            out.append(Alert("billing_drift_repaired", "warning", "Reconciliation repaired subscriptions that differed from Paddle: a webhook may have been lost.", int(r["drift_repaired"])))
+        if int(r.get("read_errors", 0)) and int(r.get("read_errors", 0)) >= int(r.get("checked", 0)) > 0:
+            out.append(Alert("billing_reconcile_blind", "critical", "Reconciliation could not read ANY subscription from Paddle (wrong environment or credentials?).", int(r["read_errors"])))
+    return out
 
 
 # ---------- push notification (deduplicated) ----------

@@ -8,7 +8,7 @@ Three layers. None needs a vendor SDK; two need an account you create. **Nothing
 | Worker push to `ALERT_WEBHOOK_URL` | Business conditions (below), each announced once per 6 h | A Slack/Discord/ntfy incoming-webhook URL |
 | `GET /health/alerts` (bearer `MONITORING_TOKEN`) | The same conditions on demand, counts only | Set `MONITORING_TOKEN` (any long random string); unset = endpoint disabled (404) |
 
-The worker cannot report its own death, so the **external** monitor on `/health/ready` is the one that matters most.
+The worker cannot report its own death, so the **external** monitor on `/health/ready` is the one that matters most. Do **not** use `/health/ready` as a load-balancer or orchestrator health check for the API: a stopped worker would take the API out of rotation. Pushed alerts also need Redis; during a Redis outage only the external monitor sees problems.
 Also run the worker under a supervisor that restarts it (docker `restart: always`, systemd `Restart=always`).
 
 ## Alert conditions
@@ -35,18 +35,28 @@ Uptime monitor account, alert webhook, `MONITORING_TOKEN`, worker supervisor and
 Error-tracking (e.g. Sentry) is not integrated.
 
 
-## Worker states (`/health/ready` → `worker_state`)
-The worker records three things in Redis: the last completed pass, a liveness beat from a background thread (every 10 s, independent of the main loop) and a phase marker while a known long job (voice-catalog sync, a pass) runs.
+## Worker states (`/health/ready` -> `worker_state`)
+The worker records: the last completed pass; a liveness beat from a **watchdog thread**; and a phase marker with its **own time budget** while the main loop runs a pass (`WORKER_PASS_BUDGET_SECONDS`, default 300).
 
 | State | Meaning | Ready (200)? |
 |---|---|---|
 | `ok` | A pass finished in the last 120 s | yes |
-| `busy` | Process is alive (liveness < 45 s), a previous pass exists, and a marked long job has run for under 15 min | yes |
-| `starting` | Process alive, no pass completed since it started, under 15 min | **no** (not operational yet), no alert |
-| `stalled` | Process alive but no progress: stale pass with no valid long job, a long job over 15 min, or startup over 15 min | no, `worker_stopped` alert |
+| `busy` | Process alive (liveness < 45 s), a previous pass exists, and the current pass is inside its budget | yes |
+| `starting` | Process alive, no pass completed since it started, under 420 s | **no** (not operational yet), no alert |
+| `stalled` | Process alive but no progress: stale pass with no valid phase, a pass over its budget, or startup over 420 s | no, `worker_stopped` alert |
 | `stopped` | No liveness beat for 45 s | no, `worker_stopped` alert |
 
-A pass recorded by a previous process (older than the current `started_at`) is ignored, so a restarted worker is never ready before it completes its own first pass. A slow voice sync therefore cannot make a live worker look dead, and a hung one is still caught by the 15-minute bound. Not verified here: behaviour under a real supervisor and a real Retell voice-list latency.
+**The liveness thread cannot hide a stuck loop.** The watchdog (`app/workers/watchdog.py`) beats only while the main loop is within its budget (or within 75 s of silence between passes). When a pass overruns, the beat stops (readiness turns `stalled`), the reason is recorded, and the process exits with code 70 so the supervisor restarts it. The next worker announces it with a `worker_watchdog_restart` warning. `WORKER_WATCHDOG_EXIT=false` disables the exit (the beat still stops). A pass from before a restart is ignored, so a restarted worker is never ready before it completes its own first pass.
+
+**Requires a supervisor that restarts on exit** (docker `restart: always`, systemd `Restart=always`); without one a watchdog exit is an outage until someone restarts the worker.
+
+## Slow jobs run beside the loop, not in it
+Voice-catalog sync and Paddle subscription reconciliation run in their own threads (`app/workers/background_jobs.py`), so they can never delay event retries, provisioning, entitlement enforcement, top-up settlement or alerts, and never affect readiness.
+- One thread per job (no self-overlap); a Redis lock per job (no overlap across workers); the "next due" key is re-checked after taking the lock.
+- Cadence: `VOICE_SYNC_INTERVAL_SECONDS` and `BILLING_RECONCILE_INTERVAL_SECONDS` (default 6 h each); after a failure the reconciliation retries after `BILLING_RECONCILE_RETRY_SECONDS` (15 min), voice sync after 5 min.
+- Reconciliation runs in apply mode, through the same stale-safe, idempotent code as the webhook: it only updates subscriptions we already hold, reads Paddle's own record over the authenticated API, skips a repair when local state is newer, ignores a snapshot with a different subscription id, and never touches a subscription that is missing at Paddle (counted and alerted for manual review). It publishes counts only.
+- Alerts: `billing_drift_unresolved` (drift that could not be repaired, missing at Paddle, or duplicate active subscriptions), `billing_drift_repaired` (warning: a webhook was probably lost), `billing_reconcile_blind` (could not read any subscription: wrong environment or key), `job_failing_*` (2+ consecutive failures), `job_overdue_*`, `job_stalled_*`, plus `config_mismatch` (API and worker resolved different environment settings).
+- Trade-off: a separate worker process would isolate a wedged driver call completely but needs a second supervisor entry. Threads were chosen; the lock TTL, hard budgets and alerts bound the risk. A wedged job thread cannot be killed, but it blocks nothing except its own next run.
 
 ## Alert delivery
 A webhook response outside 2xx (including 429 and 5xx), a timeout (5 s) or a network error counts as failed: it is logged by status/exception class only (never the URL) and the dedupe key is removed, so the alert is retried on the next sweep instead of being silenced for 6 hours. Failures never crash the worker pass.

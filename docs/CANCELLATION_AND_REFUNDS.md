@@ -35,6 +35,13 @@ Two separate actions. Cancelling never refunds, and a refund never happens becau
   adjustments still claw credits back in `topups.apply_adjustment`).
 - A refund does not cancel the subscription and does not change credits. Cancel separately if wanted.
 
+### Operating procedure for an administrator (current policy, deliberately unchanged)
+A refund returns money only. The customer keeps service, credits and their number until the subscription ends.
+- Refund **and** end service: first cancel the subscription in the Paddle dashboard (or ask the owner to use Cancel plan; for an immediate stop use the Paddle dashboard), then request the refund. Service then ends when Paddle reports `canceled`; the number is released after `NUMBER_RELEASE_DELAY_DAYS`.
+- Refund and keep service (goodwill, billing error): request the refund only.
+- Top-up purchases (no subscription) cannot be refunded through this route; refund them in the Paddle dashboard (the adjustment webhook claws the credits back).
+- A `rejected` refund is final in our records; use the Paddle dashboard.
+
 ## Legal / provider notes (to confirm, not legal advice)
 - Paddle is the merchant of record: it sells to the customer, collects and remits tax, and its buyer terms and
   consumer-law obligations (statutory withdrawal rights, etc.) apply to the transaction. Confirm the current terms

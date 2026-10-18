@@ -24,5 +24,7 @@
 | Lapse policies (3 days / 7 days) | TEMPORARY | docs/LAPSE_POLICIES.md - business decision pending |
 | Frontend production build | PASS (you, on your Mac) | no frontend changes since |
 
-- [ ] Set `PADDLE_ENV` explicitly in production and `NEXT_PUBLIC_PADDLE_ENV` to match; confirm the production app starts (the guard rejects contradictions).
+- [ ] Set `ENV=production` (only `development|test|production` are accepted) and `PADDLE_ENV` explicitly. The client token must be a `live_` token for live (`test_` for sandbox); confirm with `GET /api/v1/public-config` and a test checkout. Start BOTH the API and the worker: each refuses an unsafe configuration; confirm no `config_mismatch` alert.
+- [ ] Run the worker under a supervisor that restarts on ANY exit (the watchdog exits with code 70 on a stall).
+- [ ] After the first scheduled reconciliation (check logs for `Billing reconciliation:`), confirm no `billing_drift_unresolved` or `billing_reconcile_blind` alert.
 - [ ] After deploying the worker, confirm `/health/ready` shows `worker_state` `ok` after the first pass (`starting` before it is expected).

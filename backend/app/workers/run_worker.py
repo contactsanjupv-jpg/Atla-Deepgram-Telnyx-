@@ -8,7 +8,8 @@ One loop, Postgres-backed (no extra infrastructure). Every pass it:
   * settles ambiguous phone-number purchases,
   * enforces entitlements (suspend / release numbers for lapsed subscriptions; pause when out of credits),
   * settles top-up purchases whose Paddle webhook never arrived,
-and it syncs the voice catalog at start-up and every few hours.
+Slow jobs (voice-catalog sync, Paddle subscription reconciliation) run in their own threads
+(app/workers/background_jobs.py) so they can never delay those. A watchdog restarts the process if the loop stalls.
 Each job is idempotent, so running two workers is safe (just redundant).
 """
 import logging
@@ -22,11 +23,12 @@ from app.services.entitlement import enforce_entitlements
 from app.services.phone_provisioning import reconcile_provisioning
 from app.services.topups import reconcile_topups
 from app.workers.retell_events import retry_due_events
-from app.workers.voice_catalog_sync import sync_voice_catalog
+from app.config import get_settings
+from app.workers.background_jobs import start_background_jobs
+from app.workers.watchdog import Watchdog
 
 logger = logging.getLogger("atla.worker")
 LOOP_SECONDS = 15
-VOICE_SYNC_SECONDS = 6 * 3600
 
 
 def run_once(phone_provider=None) -> dict:
@@ -72,23 +74,25 @@ def run_once(phone_provider=None) -> dict:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    cfg = get_settings()
+    cfg.assert_startup_safe("worker")  # the same guard the API runs: an unsafe production configuration never starts
+    monitoring.publish_config_fingerprint("worker")
     monitoring.mark_started()  # passes from a previous process stop counting; not "ready" until THIS one completes a pass
-    monitoring.start_liveness_thread()  # proves the process is alive while a slow sync or pass is running
-    last_voice_sync = 0.0
+    budget = cfg.WORKER_PASS_BUDGET_SECONDS
+    dog = Watchdog(
+        beat=monitoring.beat,
+        idle_grace=LOOP_SECONDS + 60,
+        exit_fn=None if cfg.WORKER_WATCHDOG_EXIT else (lambda: None),
+        on_stall=monitoring.record_watchdog_exit,
+    )
+    dog.start()
+    start_background_jobs()  # voice sync + billing reconciliation: own threads, locks and budgets; never block the loop
     while True:
-        if time.time() - last_voice_sync > VOICE_SYNC_SECONDS:
-            try:
-                with monitoring.phase("voice_sync"):
-                    synced = sync_voice_catalog()
-                logger.info("Voice catalog synced: %s voices", synced)
-                last_voice_sync = time.time()
-            except Exception:  # noqa: BLE001
-                logger.exception("Voice sync failed; will retry")
-                last_voice_sync = time.time() - VOICE_SYNC_SECONDS + 300
-        with monitoring.phase("pass"):
-            run_once()
+        dog.enter("pass", budget)
+        try:
+            with monitoring.phase("pass", budget):
+                run_once()
+        finally:
+            dog.leave()
+        monitoring.publish_config_fingerprint("worker")
         time.sleep(LOOP_SECONDS)
-
-
-if __name__ == "__main__":
-    main()

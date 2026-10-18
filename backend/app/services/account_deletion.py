@@ -88,7 +88,7 @@ def delete_organization(
         if phone_rows:
             phones = phones or RetellPhoneProvider()
             for phone in phone_rows:
-                release_number(db, phone, phones)
+                release_number(db, phone, phones, reason="account_deleted")
 
         agent_rows = db.query(Agent).filter(Agent.organization_id == org_id).all()
         if agent_rows:

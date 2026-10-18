@@ -304,3 +304,115 @@ def test_the_status_route_is_scoped_and_honest(fake):
     assert _auto(org, fake) == "blocked_payment"
     j = c.get(f"/api/v1/orgs/{org}/phone-numbers/provisioning").json()
     assert j["state"] == "blocked" and "refund" not in j["message"].lower()
+
+
+# ---------- a number released for a LAPSED subscription is re-bought when the subscription is active again ----------
+
+def _release(org, fake, reason):
+    from app.services.phone_provisioning import active_number, release_number
+    db = SessionLocal()
+    try:
+        release_number(db, active_number(db, uuid.UUID(org)), fake, reason=reason)
+    finally:
+        db.close()
+
+
+def _bought(fake):
+    org = _org()
+    _webhook(org, f"sub_{uuid.uuid4().hex[:10]}")
+    assert fake.purchases == 1 and _prov(org)[0] == "purchased"
+    return org
+
+
+def _generation(org):
+    db = SessionLocal()
+    try:
+        row = db.query(PhoneProvisioning).filter(PhoneProvisioning.organization_id == uuid.UUID(org)).one()
+        return row.generation, row.nickname
+    finally:
+        db.close()
+
+
+def test_a_number_released_by_the_lapse_sweep_is_replaced_under_a_new_generation_when_active_again(fake):
+    org = _bought(fake)
+    _release(org, fake, "entitlement")
+    assert _prov(org)[0] == "released" and _state(org)["state"] == "provisioning"
+    assert _auto(org, fake) == "purchased"
+    assert fake.purchases == 2 and _generation(org)[0] == 2 and _generation(org)[1].endswith("-2")
+    assert _prov(org)[0] == "purchased" and _state(org)["state"] == "ready"
+    assert _live_agents(org) == 0  # still not live: activation stays a separate verified step
+
+
+def test_a_second_pass_never_buys_again_once_the_replacement_exists(fake):
+    org = _bought(fake)
+    _release(org, fake, "entitlement")
+    assert _auto(org, fake) == "purchased"
+    assert _auto(org, fake) == "already_provisioned" and _auto(org, fake, _later(600)) == "already_provisioned"
+    db = SessionLocal()
+    try:
+        assert settle_auto_provisioning(db, fake, organization_ids={uuid.UUID(org)}) == 0
+    finally:
+        db.close()
+    assert fake.purchases == 2
+
+
+def test_a_release_the_customer_asked_for_never_buys_a_replacement(fake):
+    org = _bought(fake)
+    _release(org, fake, "customer")
+    assert _auto(org, fake, _later(600)) == "skipped" and fake.purchases == 1
+
+
+def test_a_release_from_account_deletion_never_buys_a_replacement(fake):
+    org = _bought(fake)
+    _release(org, fake, "account_deleted")
+    assert _auto(org, fake, _later(600)) == "skipped" and fake.purchases == 1
+
+
+def test_a_released_number_is_not_replaced_while_the_subscription_is_not_active(fake):
+    from tests.test_phone_lifecycle import _set_sub_status
+    org = _bought(fake)
+    _release(org, fake, "entitlement")
+    _set_sub_status(org, "past_due", datetime.now(timezone.utc))
+    assert _auto(org, fake) == "not_eligible" and fake.purchases == 1
+
+
+def test_the_worker_sweep_replaces_the_released_number_exactly_once(fake):
+    org = _bought(fake)
+    _release(org, fake, "entitlement")
+    db = SessionLocal()
+    try:
+        assert settle_auto_provisioning(db, fake, organization_ids={uuid.UUID(org)}) == 1
+        assert settle_auto_provisioning(db, fake, organization_ids={uuid.UUID(org)}) == 0
+    finally:
+        db.close()
+    assert fake.purchases == 2 and _numbers(org) == 2  # the released row is history; one active number
+
+
+def test_an_ambiguous_replacement_purchase_is_adopted_not_re_bought(fake):
+    org = _bought(fake)
+    _release(org, fake, "entitlement")
+    fake.timeout_after_success = 1  # the provider buys the replacement but the reply is lost
+    assert _auto(org, fake) == "pending" and fake.purchases == 2 and _prov(org)[0] == "ambiguous"
+    assert _auto(org, fake, _later(600)) == "skipped" and fake.purchases == 2  # still never re-bought
+    from app.services.phone_provisioning import reconcile_provisioning
+    db = SessionLocal()
+    try:
+        assert reconcile_provisioning(db, fake, now=_later(5), organization_ids={uuid.UUID(org)}) == 1
+    finally:
+        db.close()
+    assert fake.purchases == 2 and _prov(org)[0] == "purchased"
+
+
+def test_the_full_cycle_lapse_release_then_resubscribe_ends_with_one_new_number(fake):
+    from app.services.entitlement import enforce_entitlements
+    from tests.test_phone_lifecycle import _set_sub_status
+    org = _bought(fake)
+    _set_sub_status(org, "canceled", datetime.now(timezone.utc) - timedelta(days=30))
+    db = SessionLocal()
+    try:
+        assert enforce_entitlements(db, fake, organization_ids={uuid.UUID(org)})["released"] == 1
+    finally:
+        db.close()
+    assert _prov(org) == ("released", 1, "released_by=entitlement")
+    _webhook(org, f"sub_{uuid.uuid4().hex[:10]}")  # the customer subscribes again
+    assert fake.purchases == 2 and _prov(org)[0] == "purchased" and _generation(org)[0] == 2

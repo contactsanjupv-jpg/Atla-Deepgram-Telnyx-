@@ -124,7 +124,11 @@ def reconcile_subscriptions(db: Session, provider, apply: bool = False) -> Recon
             report.errors.append(external_id)
             continue
         if remote is None:
-            report.missing_at_paddle.append(external_id)
+            report.missing_at_paddle.append(external_id)  # never changed automatically: a human reviews it
+            continue
+        if remote.get("id") not in (None, external_id):  # never apply a snapshot of a different subscription
+            logger.error("Reconcile: Paddle returned a different subscription than requested for %s", external_id)
+            report.errors.append(external_id)
             continue
         diffs = _differences(local, remote)
         if not diffs:

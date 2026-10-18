@@ -1,7 +1,21 @@
+import { resolvePaddleEnvironment, type PaddleEnvironment } from "./paddleEnv";
 import { CheckoutEventNames, initializePaddle, type Paddle } from "@paddle/paddle-js";
 
 const TOKEN = process.env.NEXT_PUBLIC_PADDLE_CLIENT_TOKEN;
-const ENV = process.env.NEXT_PUBLIC_PADDLE_ENV === "live" ? "production" : "sandbox";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+
+/** Asks the backend which Paddle environment it uses and verifies this build's token belongs to it. */
+async function checkedEnvironment(): Promise<PaddleEnvironment> {
+  const res = await fetch(`${API_BASE}/api/v1/public-config`, { credentials: "include" });
+  if (!res.ok) throw new Error("billing environment unavailable");
+  const body = (await res.json()) as { paddle_env?: unknown };
+  const check = resolvePaddleEnvironment(body.paddle_env, TOKEN);
+  if (!check.ok) {
+    console.error(check.reason);
+    throw new Error(check.reason);
+  }
+  return check.environment;
+}
 
 interface Handlers {
   onCompleted: () => void;
@@ -25,9 +39,10 @@ export function transactionIdFrom(checkoutUrl: string): string | null {
 export async function openCheckout(transactionId: string, handlers: Handlers): Promise<void> {
   if (!TOKEN) throw new Error("payments not configured");
   current = handlers;
+  const environment = await checkedEnvironment(); // fails closed on a sandbox/live mismatch, before any checkout opens
   if (!paddle) {
     paddle = initializePaddle({
-      environment: ENV,
+      environment,
       token: TOKEN,
       eventCallback: (event) => {
         if (event.name === CheckoutEventNames.CHECKOUT_COMPLETED) current?.onCompleted();

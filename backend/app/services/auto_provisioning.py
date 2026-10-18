@@ -27,6 +27,7 @@ from app.services.phone_provisioning import (
     ProvisioningInProgress,
     ProvisioningPending,
     ProvisioningPaymentRequired,
+    RELEASED_BY_ENTITLEMENT,
     active_number,
     provision_number,
 )
@@ -47,12 +48,21 @@ def _eligible_subscription(db: Session, org_id: uuid.UUID) -> Subscription | Non
     return sub
 
 
+def _released_for_lapse(prov: PhoneProvisioning | None) -> bool:
+    """The number was released BY OUR ENTITLEMENT SWEEP (lapsed subscription), not by the customer or an account
+    deletion. Only this case is re-armed automatically. provision_number holds the per-org lock, will not buy while an
+    active number exists, and finds (adopts) any purchase that is still purchasing/ambiguous before buying again."""
+    return prov is not None and prov.status == "released" and prov.last_error == RELEASED_BY_ENTITLEMENT
+
+
 def _may_attempt(prov: PhoneProvisioning | None, now: datetime) -> bool:
     if prov is None:
         return True
     cfg = get_settings()
     if prov.status == "requested":
         return True
+    if _released_for_lapse(prov):
+        return True  # re-provision once the subscription is active again; provision_number starts a NEW generation
     retryable = prov.status == "blocked_payment" or (prov.status == "failed" and prov.last_error == _RETRYABLE_FAILURE)
     if not retryable:
         return False  # purchasing / ambiguous (reconcile owns it), purchased, released, or a definitive rejection
@@ -130,7 +140,7 @@ def provisioning_state(db: Session, org_id: uuid.UUID, now: datetime | None = No
         return {"state": "none", "message": "A phone number is set up after your paid subscription is confirmed.",
                 "number": None, "retry_at": None}
     prov = db.query(PhoneProvisioning).filter(PhoneProvisioning.organization_id == org_id).first()
-    if prov is None or prov.status in ("requested", "purchasing", "ambiguous"):
+    if prov is None or prov.status in ("requested", "purchasing", "ambiguous") or _released_for_lapse(prov):
         return {"state": "provisioning", "message": "Your subscription is active. We are setting up your phone number.",
                 "number": None, "retry_at": None}
     retry_at = None

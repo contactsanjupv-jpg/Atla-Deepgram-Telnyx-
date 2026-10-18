@@ -11,7 +11,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # App
-    ENV: str = "development"
+    # Only these environments exist. An unknown value (a typo such as "prod", or "Production") must fail start-up:
+    # every production safeguard keys off ENV == "production", so a silent fallback would disable them all.
+    ENV: Literal["development", "test", "production"] = "development"
     APP_SECRET_KEY: str  # used for session signing — required, no default
     FRONTEND_URL: str = "http://localhost:3000"
 
@@ -101,6 +103,15 @@ class Settings(BaseSettings):
     ALERT_WEBHOOK_URL: str = ""
     ALERT_COOLDOWN_SECONDS: int = 6 * 3600
 
+    # Background jobs that run beside the worker's time-sensitive loop (app/workers/background_jobs.py).
+    VOICE_SYNC_INTERVAL_SECONDS: int = 6 * 3600
+    BILLING_RECONCILE_INTERVAL_SECONDS: int = 6 * 3600
+    BILLING_RECONCILE_RETRY_SECONDS: int = 900  # after a failed run
+    # A worker pass (events, provisioning, entitlements, top-ups, alerts) that runs longer than this is a stall:
+    # the watchdog stops the liveness beat and exits the process so the supervisor restarts it.
+    WORKER_PASS_BUDGET_SECONDS: int = 300
+    WORKER_WATCHDOG_EXIT: bool = True
+
     # Paddle (billing) — server-side only
     # Selects the Paddle API host (sandbox-api.paddle.com vs api.paddle.com) in providers/billing. Any other value is
     # rejected at start-up. The frontend has its OWN NEXT_PUBLIC_PADDLE_ENV: set both together (see docs).
@@ -143,6 +154,38 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.ENV == "production"
+
+    def assert_startup_safe(self, process: str) -> None:
+        """Called by EVERY process (API and worker) before it does anything. Production refuses to start with an
+        unsafe configuration; the message lists setting names only, never values."""
+        if self.is_production:
+            problems = self.production_config_problems()
+            if problems:
+                raise RuntimeError(f"Unsafe production configuration ({process}): " + "; ".join(problems))
+
+    def config_fingerprint(self) -> str:
+        """Digest of the NON-secret settings that must be identical in the API and the worker. Never reversible to,
+        and never includes, a credential or a password."""
+        import hashlib
+        import json
+
+        from sqlalchemy.engine import make_url
+
+        def where(url: str) -> str:
+            try:
+                u = make_url(url)
+                return f"{u.host}:{u.port}/{u.database}"
+            except Exception:  # noqa: BLE001
+                return "unparseable"
+
+        parts = {
+            "env": self.ENV, "paddle_env": self.PADDLE_ENV, "allow_sandbox": self.ALLOW_SANDBOX_BILLING_IN_PRODUCTION,
+            "frontend": self.FRONTEND_URL, "backend": self.BACKEND_PUBLIC_URL,
+            "db": where(self.DATABASE_URL), "redis": where(self.REDIS_URL),
+            "prices": [self.PADDLE_STARTER_PRICE_ID, self.PADDLE_GROWTH_PRICE_ID],
+            "policy": [self.PAST_DUE_GRACE_DAYS, self.NUMBER_RELEASE_DELAY_DAYS],
+        }
+        return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:16]
 
     def production_config_problems(self) -> list[str]:
         """Names of settings that make a PRODUCTION deploy unsafe or non-functional. Never includes values."""

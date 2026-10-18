@@ -40,7 +40,10 @@ def _clean_monitoring_state(monkeypatch):
         r.delete(key)
     for key in r.scan_iter("atla:counter:*"):
         r.delete(key)
-    r.delete(monitoring.HEARTBEAT_KEY, monitoring.FAILURES_KEY, "atla:monitoring:sweep")
+    for pattern in ("atla:worker:*", "atla:job:*", "atla:config:*", "lock:job:*"):
+        for key in r.scan_iter(pattern):
+            r.delete(key)
+    r.delete("atla:monitoring:sweep")
     monkeypatch.setattr(get_settings(), "MONITORING_TOKEN", TOKEN)
     monkeypatch.setattr(get_settings(), "ALERT_WEBHOOK_URL", "")
     yield
@@ -392,11 +395,13 @@ def test_a_failing_alert_webhook_cannot_crash_the_worker_pass(monkeypatch):
 def _set(**keys):
     r = monitoring._redis
     now = time.time()
+    r.delete(monitoring.HEARTBEAT_KEY, monitoring.LIVENESS_KEY, monitoring.STARTED_KEY, monitoring.PHASE_KEY)
     for name, key in (("last_pass", monitoring.HEARTBEAT_KEY), ("liveness", monitoring.LIVENESS_KEY), ("started", monitoring.STARTED_KEY)):
         if name in keys:
             r.set(key, str(now - keys[name]))
     if "phase" in keys:
-        r.set(monitoring.PHASE_KEY, f"voice_sync|{now - keys['phase'][1]}")  # (name, seconds ago)
+        age, budget = keys["phase"]
+        r.set(monitoring.PHASE_KEY, f"pass|{now - age}|{budget}")
 
 
 def _state():
@@ -408,95 +413,311 @@ def test_a_fresh_start_is_not_ready_until_its_first_pass_completes_and_is_not_an
     assert _state() == "starting" and monitoring.worker_status()["alive"] is False
     assert "worker_stopped" not in _keys()
     assert client.get("/health/ready").json()["worker_state"] == "starting"
-    assert client.get("/health/ready").status_code == 503  # honest: not operational yet
+    assert client.get("/health/ready").status_code == 503
     monitoring.record_worker_pass(failed=False)
     assert _state() == "ok" and client.get("/health/ready").status_code == 200
 
 
-def test_a_slow_initial_voice_sync_is_starting_not_ready_and_not_dead():
-    _set(started=400, liveness=3, phase=("voice_sync", 390))
-    st = monitoring.worker_status()
-    assert st["state"] == "starting" and st["alive"] is False and "worker_stopped" not in _keys()
-
-
-def test_a_slow_startup_that_never_finishes_becomes_stalled_after_the_grace_period():
+def test_a_first_pass_that_never_finishes_becomes_stalled_after_the_startup_grace():
     _set(started=monitoring.STARTUP_GRACE_SECONDS + 60, liveness=3)
     assert _state() == "stalled" and _keys()["worker_stopped"] == 1
 
 
-def test_a_running_worker_inside_a_long_voice_sync_stays_ready():
-    _set(last_pass=400, liveness=3, phase=("voice_sync", 300))  # last pass is stale, but a known long job is running
+def test_a_slow_pass_inside_its_budget_stays_ready():
+    _set(last_pass=200, liveness=3, phase=(150, 300))
     st = monitoring.worker_status()
     assert st["state"] == "busy" and st["alive"] is True and "worker_stopped" not in _keys()
     assert client.get("/health/ready").status_code == 200
 
 
-def test_a_long_operation_that_exceeds_its_bound_is_a_stall():
-    _set(last_pass=2000, liveness=3, phase=("voice_sync", monitoring.PHASE_MAX_SECONDS + 100))
+def test_a_pass_beyond_its_own_budget_is_a_stall_not_busy():
+    _set(last_pass=2000, liveness=3, phase=(400, 300))
     assert _state() == "stalled" and "worker_stopped" in _keys()
     assert client.get("/health/ready").status_code == 503
 
 
+def test_each_phase_is_judged_by_its_own_budget():
+    _set(last_pass=500, liveness=3, phase=(500, 900))  # the same age is fine under a 900 s budget...
+    assert _state() == "busy"
+    _set(last_pass=500, liveness=3, phase=(500, 300))  # ...and a stall under a 300 s one
+    assert _state() == "stalled"
+
+
 def test_a_stale_pass_with_a_live_process_and_no_excuse_is_stalled():
+    monitoring._redis.delete(monitoring.PHASE_KEY)
     _set(last_pass=monitoring.WORKER_STALE_SECONDS + 100, liveness=3)
     assert _state() == "stalled"
 
 
 def test_a_stale_pass_and_a_stale_process_is_stopped():
+    monitoring._redis.delete(monitoring.PHASE_KEY)
     _set(last_pass=monitoring.WORKER_STALE_SECONDS + 100, liveness=monitoring.LIVENESS_STALE_SECONDS + 100)
     assert _state() == "stopped" and "worker_stopped" in _keys()
 
 
 def test_a_phase_alone_cannot_hide_a_dead_process():
-    _set(last_pass=1000, liveness=monitoring.LIVENESS_STALE_SECONDS + 100, phase=("voice_sync", 10))
+    _set(last_pass=1000, liveness=monitoring.LIVENESS_STALE_SECONDS + 100, phase=(10, 300))
     assert _state() == "stopped"
 
 
 def test_a_pass_recorded_by_a_previous_process_does_not_make_a_restarted_worker_ready():
-    _set(last_pass=20, started=5, liveness=1)  # old process finished a pass 20s ago; new process started 5s ago
+    monitoring._redis.delete(monitoring.PHASE_KEY)
+    _set(last_pass=20, started=5, liveness=1)
     assert _state() == "starting" and monitoring.worker_status()["alive"] is False
 
 
-def test_the_phase_context_marks_and_clears_the_long_operation():
-    with monitoring.phase("voice_sync"):
-        assert monitoring._redis.get(monitoring.PHASE_KEY).startswith("voice_sync|")
+def test_the_phase_context_marks_its_budget_and_clears_even_on_failure():
+    with monitoring.phase("pass", 123):
+        assert monitoring._redis.get(monitoring.PHASE_KEY).startswith("pass|") and monitoring._redis.get(monitoring.PHASE_KEY).endswith("|123")
     assert monitoring._redis.get(monitoring.PHASE_KEY) is None
     with pytest.raises(RuntimeError):
-        with monitoring.phase("voice_sync"):
-            raise RuntimeError("sync blew up")
-    assert monitoring._redis.get(monitoring.PHASE_KEY) is None  # cleared even on failure
+        with monitoring.phase("pass", 123):
+            raise RuntimeError("boom")
+    assert monitoring._redis.get(monitoring.PHASE_KEY) is None
 
 
-def test_the_liveness_thread_keeps_beating_while_the_main_loop_is_busy():
+# ---------------- watchdog: a stuck main loop can neither look healthy nor stay alive ----------------
+
+class _Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def _dog(clock, **kw):
+    from app.workers.watchdog import Watchdog
+
+    beats, exits, stalls = [], [], []
+    d = Watchdog(beat=lambda: beats.append(clock.t), idle_grace=75, exit_fn=lambda: exits.append(1), on_stall=stalls.append, clock=clock, **kw)
+    return d, beats, exits, stalls
+
+
+def test_the_watchdog_beats_while_the_loop_is_inside_its_budget():
+    c = _Clock()
+    d, beats, exits, _ = _dog(c)
+    d.enter("pass", 300)
+    c.t += 299
+    assert d.check() is True and beats and not exits
+
+
+def test_a_stuck_pass_stops_the_beat_records_why_and_exits_the_process():
+    c = _Clock()
+    d, beats, exits, stalls = _dog(c)
+    d.enter("pass", 300)
+    c.t += 301
+    assert d.check() is False
+    assert beats == [] and exits == [1] and stalls == ["pass"]
+    c.t += 50
+    assert d.check() is False and exits == [1]  # exits once, and never beats again
+
+
+def test_a_loop_that_goes_silent_between_passes_is_also_caught():
+    c = _Clock()
+    d, beats, exits, stalls = _dog(c)
+    d.enter("pass", 300)
+    d.leave()
+    c.t += 74
+    assert d.check() is True
+    c.t += 2
+    assert d.check() is False and exits and stalls == ["idle"]
+
+
+def test_progress_resets_the_clock_so_a_healthy_loop_is_never_killed():
+    c = _Clock()
+    d, beats, exits, _ = _dog(c)
+    for _ in range(10):
+        d.enter("pass", 300)
+        c.t += 200
+        d.leave()
+        c.t += 15
+        assert d.check() is True
+    assert not exits
+
+
+def test_the_watchdog_thread_beats_then_stops_beating_after_a_stall():
+    from app.workers.watchdog import Watchdog
+
+    exits = []
+    d = Watchdog(beat=monitoring.beat, idle_grace=0.2, interval=0.05, exit_fn=lambda: exits.append(1))
     monitoring._redis.delete(monitoring.LIVENESS_KEY)
-    stop = monitoring.start_liveness_thread(interval=0.05)
+    stop = d.start()
     try:
-        time.sleep(0.3)
-        assert float(monitoring._redis.get(monitoring.LIVENESS_KEY)) > time.time() - 2
+        time.sleep(0.12)
+        assert monitoring._redis.get(monitoring.LIVENESS_KEY) is not None
+        time.sleep(0.5)  # no enter/leave: the loop is "silent" past its grace
+        assert exits == [1]
+        before = monitoring._redis.get(monitoring.LIVENESS_KEY)
+        time.sleep(0.2)
+        assert monitoring._redis.get(monitoring.LIVENESS_KEY) == before
     finally:
         stop.set()
 
 
-def test_the_worker_main_loop_marks_start_and_wraps_the_voice_sync_in_a_phase(monkeypatch):
-    seen = {}
+def test_a_watchdog_restart_is_announced_by_the_next_worker():
+    monitoring.record_watchdog_exit("pass")
+    assert "worker_watchdog_restart" in _keys()
+    monitoring._redis.delete(monitoring.WATCHDOG_EXIT_KEY)
+    assert "worker_watchdog_restart" not in _keys()
 
-    def fake_sync():
-        seen["during_sync"] = monitoring.worker_status()["state"]
-        seen["phase"] = monitoring._redis.get(monitoring.PHASE_KEY)
-        return 3
+
+def test_the_worker_loop_wires_guard_fingerprint_watchdog_and_jobs_in_order(monkeypatch):
+    calls = []
 
     class Stop(Exception):
         pass
 
-    def stop_sleep(_):
-        raise Stop
+    from types import SimpleNamespace
 
-    monkeypatch.setattr(run_worker, "sync_voice_catalog", fake_sync)
-    monkeypatch.setattr(run_worker, "run_once", lambda *a, **k: monitoring.record_worker_pass(failed=False) or {})
-    monkeypatch.setattr(run_worker.time, "sleep", stop_sleep)
-    monkeypatch.setattr(monitoring, "start_liveness_thread", lambda *a, **k: None)
+    fake = SimpleNamespace(assert_startup_safe=lambda p: calls.append(("guard", p)), WORKER_PASS_BUDGET_SECONDS=300, WORKER_WATCHDOG_EXIT=True)
+    monkeypatch.setattr(run_worker, "get_settings", lambda: fake)
+    monkeypatch.setattr(monitoring, "publish_config_fingerprint", lambda r: calls.append(("fingerprint", r)))
+    monkeypatch.setattr(monitoring, "mark_started", lambda: calls.append(("started",)))
+    monkeypatch.setattr(run_worker, "Watchdog", lambda **k: type("D", (), {"start": lambda s: calls.append(("watchdog",)), "enter": lambda s, n, b: calls.append(("enter", n, b)), "leave": lambda s: calls.append(("leave",))})())
+    monkeypatch.setattr(run_worker, "start_background_jobs", lambda: calls.append(("jobs",)))
+    monkeypatch.setattr(run_worker, "run_once", lambda *a, **k: calls.append(("pass",)) or {})
+    monkeypatch.setattr(run_worker.time, "sleep", lambda _: (_ for _ in ()).throw(Stop()))
     with pytest.raises(Stop):
         run_worker.main()
-    assert seen["during_sync"] == "starting"  # not "ok"/"busy": it must not look ready during the first sync
-    assert seen["phase"].startswith("voice_sync|")
-    assert monitoring.worker_status()["state"] == "ok"  # ready only after the first pass
+    order = [c[0] for c in calls]
+    assert order[:5] == ["guard", "fingerprint", "started", "watchdog", "jobs"]
+    assert ("enter", "pass", 300) in calls and ("pass",) in calls and order.index("pass") < order.index("leave")
+
+
+def test_an_unsafe_production_configuration_stops_the_worker_before_it_does_anything(monkeypatch):
+    from app.config import Settings
+
+    bad = Settings(_env_file=None, ENV="production", APP_SECRET_KEY="short", DATABASE_URL="postgresql+psycopg://u:p@h/db")
+    monkeypatch.setattr(run_worker, "get_settings", lambda: bad)
+    started = []
+    monkeypatch.setattr(monitoring, "mark_started", lambda: started.append(1))
+    with pytest.raises(RuntimeError, match=r"Unsafe production configuration \(worker\)"):
+        run_worker.main()
+    assert started == []
+
+
+# ---------------- background jobs: scheduling, isolation, overlap ----------------
+
+from app.workers import background_jobs  # noqa: E402
+
+
+def _run(name, fn, interval=3600, retry=60, budget=300):
+    return background_jobs.run_job(name, fn, interval=interval, retry=retry, budget=budget)
+
+
+def test_a_job_runs_once_per_interval_and_records_success():
+    calls = []
+    assert _run("voice_sync", lambda: calls.append(1)) == "ok"
+    assert _run("voice_sync", lambda: calls.append(1)) == "not_due" and len(calls) == 1
+    assert monitoring.job_get("voice_sync", "last_success") and monitoring.job_failure_count("voice_sync") == 0
+
+
+def test_a_failing_job_is_counted_retried_soon_and_never_raises():
+    def boom():
+        raise RuntimeError("provider down")
+
+    assert _run("billing_reconcile", boom, retry=1) == "failed"
+    assert monitoring.job_failure_count("billing_reconcile") == 1 and monitoring.job_get("billing_reconcile", "last_success") is None
+    assert _run("billing_reconcile", boom, retry=1) == "not_due"  # backs off for the retry delay
+    time.sleep(1.2)
+    assert _run("billing_reconcile", boom, retry=1) == "failed" and monitoring.job_failure_count("billing_reconcile") == 2
+    assert "job_failing_billing_reconcile" in _keys()
+    time.sleep(1.2)
+    assert _run("billing_reconcile", lambda: None) == "ok" and monitoring.job_failure_count("billing_reconcile") == 0
+
+
+def test_two_workers_never_run_the_same_job_at_once():
+    import threading
+
+    inside, overlaps, results = [], [], []
+    gate = threading.Event()
+
+    def slow():
+        inside.append(1)
+        gate.wait(2)
+
+    t = threading.Thread(target=lambda: results.append(_run("voice_sync", slow)))
+    t.start()
+    time.sleep(0.2)
+    results.append(_run("voice_sync", lambda: overlaps.append(1)))  # second "worker" while the first is mid-run
+    gate.set()
+    t.join()
+    assert overlaps == [] and sorted(results) == ["locked", "ok"] and len(inside) == 1
+
+
+def test_a_second_worker_that_waited_for_the_lock_does_not_repeat_a_finished_run():
+    calls = []
+    assert _run("voice_sync", lambda: calls.append(1)) == "ok"
+    assert _run("voice_sync", lambda: calls.append(1)) == "not_due" and len(calls) == 1
+
+
+def test_a_hung_job_cannot_block_the_worker_pass_and_is_reported_on_its_own(monkeypatch):
+    import threading
+
+    release = threading.Event()
+    t = threading.Thread(target=lambda: _run("voice_sync", lambda: release.wait(5), budget=60), daemon=True)
+    t.start()
+    time.sleep(0.2)
+    # the time-sensitive pass still runs and records its heartbeat while the sync is stuck
+    for name, val in (("retry_due_events", lambda: 0), ("reconcile_provisioning", lambda db, p: 0), ("enforce_entitlements", lambda db, p: {}),
+                      ("settle_auto_provisioning", lambda db, p: 0), ("reconcile_topups", lambda db: 0)):
+        monkeypatch.setattr(run_worker, name, val)
+    t0 = time.time()
+    run_worker.run_once(phone_provider=FakePhone())
+    assert time.time() - t0 < 3 and monitoring.worker_status()["age_seconds"] < 3
+    # monitoring flags the overdue job without touching worker readiness
+    monitoring.job_record("voice_sync", "last_start", str(time.time() - monitoring.JOB_HARD_BUDGET_SECONDS["voice_sync"] - 5))
+    assert "job_stalled_voice_sync" in _keys()
+    release.set()
+    t.join()
+
+
+def test_the_main_loop_no_longer_runs_voice_sync_or_reconciliation_inline():
+    import inspect
+
+    src = inspect.getsource(run_worker)
+    assert "sync_voice_catalog" not in src and "reconcile_subscriptions" not in src and "start_background_jobs" in src
+
+
+def test_job_overdue_and_voice_sync_alerts_use_each_jobs_own_interval(monkeypatch):
+    monkeypatch.setattr(get_settings(), "BILLING_RECONCILE_INTERVAL_SECONDS", 100)
+    monitoring.job_record("billing_reconcile", "last_success", str(time.time() - (3 * 100 + monitoring.JOB_HARD_BUDGET_SECONDS["billing_reconcile"] + 10)))
+    keys = _keys()
+    assert "job_overdue_billing_reconcile" in keys and "job_overdue_voice_sync" not in keys
+
+
+# ---------------- scheduled Paddle reconciliation: what it reports and what it may change ----------------
+
+import json as _json  # noqa: E402
+
+
+def _report_alerts(**over):
+    base = {"checked": 5, "drift_repaired": 0, "drift_unresolved": 0, "missing_at_paddle": 0, "read_errors": 0, "duplicate_active_orgs": 0}
+    monitoring.job_record("billing_reconcile", "report", _json.dumps({**base, **over}))
+    return _keys()
+
+
+def test_unresolved_drift_missing_subscriptions_and_duplicates_raise_a_critical_alert():
+    assert "billing_drift_unresolved" not in _report_alerts()
+    assert _report_alerts(drift_unresolved=1)["billing_drift_unresolved"] == 1
+    assert _report_alerts(missing_at_paddle=2)["billing_drift_unresolved"] == 2
+    assert _report_alerts(duplicate_active_orgs=1)["billing_drift_unresolved"] == 1
+
+
+def test_a_repaired_drift_warns_that_a_webhook_may_have_been_lost():
+    keys = _report_alerts(drift_repaired=2)
+    assert keys["billing_drift_repaired"] == 2 and "billing_drift_unresolved" not in keys
+
+
+def test_reconciliation_that_cannot_read_any_subscription_is_flagged_as_blind():
+    assert "billing_reconcile_blind" in _report_alerts(checked=3, read_errors=3)
+    assert "billing_reconcile_blind" not in _report_alerts(checked=3, read_errors=1)
+
+
+def test_the_config_mismatch_condition_is_a_critical_alert_and_clears_when_they_agree():
+    monitoring._redis.set("atla:config:api", "aaaa")
+    monitoring._redis.set("atla:config:worker", "bbbb")
+    assert _keys().get("config_mismatch") == 1
+    monitoring._redis.set("atla:config:worker", "aaaa")
+    assert "config_mismatch" not in _keys()
