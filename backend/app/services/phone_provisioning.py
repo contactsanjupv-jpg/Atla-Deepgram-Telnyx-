@@ -45,6 +45,9 @@ class ProvisioningPaymentRequired(ProvisioningFailed):
 
 
 PAYMENT_REQUIRED = 402
+# Set by the reconciler when it PROVED (provider list, by our deterministic nickname) that an ambiguous purchase never
+# happened. That makes the row safe to retry later; auto_provisioning treats exactly this marker as retryable.
+NOT_FOUND_AFTER_RECONCILE = "no provider number found after 10 minutes"
 
 
 def _nickname(org_id: uuid.UUID, generation: int) -> str:
@@ -105,8 +108,15 @@ def provision_number(
 
             provider = provider or RetellPhoneProvider()
 
-            if prov.status in ("purchasing", "ambiguous", "purchased"):
-                found = provider.find_number_by_nickname(prov.nickname)
+            # Look the nickname up BEFORE any (re)purchase: for every row that is not a first-ever attempt, and for
+            # any in-flight/finished one. A retry must adopt a number the provider already has, never buy a second.
+            if prov.attempts > 0 or prov.status in ("purchasing", "ambiguous", "purchased"):
+                try:
+                    found = provider.find_number_by_nickname(prov.nickname)
+                except (RetellAPIError, RuntimeError) as e:
+                    # Cannot prove nothing exists, so do NOT buy. Leave the row untouched; the next sweep retries.
+                    logger.error("Nickname look-up failed before a retry; not purchasing [org=%s]: %s", org_id, e)
+                    raise ProvisioningPending() from e
                 if found is not None:
                     return _adopt(db, prov, found)  # reconcile instead of buying again
 
@@ -152,7 +162,7 @@ def reconcile_provisioning(
                     _adopt(db, prov, found)
                     settled += 1
                 elif prov.updated_at <= now - timedelta(minutes=10):
-                    prov.status, prov.last_error = "failed", "no provider number found after 10 minutes"
+                    prov.status, prov.last_error = "failed", NOT_FOUND_AFTER_RECONCILE
                     db.commit()
                     settled += 1
         except LockNotAcquired:

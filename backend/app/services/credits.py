@@ -100,6 +100,15 @@ def ensure_plan_grant(db: Session, sub: Subscription, now: datetime | None = Non
     plan = PLANS.get(sub.plan_id)
     if plan is None or plan.included_minutes <= 0:
         return False
+    # A duplicate subscription (the customer paid twice) is scheduled to cancel at period end and must not receive its
+    # own allowance: only the subscription of record (billing_state.current_subscription: the OLDEST active one, the
+    # same rule duplicate_subscriptions uses) is granted minutes. If the record later ends, the remaining active
+    # subscription becomes the record and is granted by the next webhook / reconcile / credits read.
+    record = current_subscription(db, sub.organization_id)
+    if record is not None and record.id != sub.id:
+        logger.warning("Not granting minutes to duplicate subscription %s [org=%s]: %s is the subscription of record",
+                       sub.external_subscription_id, sub.organization_id, record.external_subscription_id)
+        return False
     key = _grant_key(sub)
     created = _insert_once(
         db,

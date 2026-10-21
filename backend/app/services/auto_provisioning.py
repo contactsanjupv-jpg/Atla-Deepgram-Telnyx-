@@ -27,6 +27,7 @@ from app.services.phone_provisioning import (
     ProvisioningInProgress,
     ProvisioningPending,
     ProvisioningPaymentRequired,
+    NOT_FOUND_AFTER_RECONCILE,
     RELEASED_BY_ENTITLEMENT,
     active_number,
     provision_number,
@@ -36,9 +37,12 @@ from app.services.plans import Feature, plan_allows
 logger = logging.getLogger("atla.auto_provisioning")
 
 SWEEP_LIMIT = 25
-# Statuses a rejected/never-sent purchase can be retried from. "failed" is retried ONLY when nothing reached the
-# provider (status=0); a definitive provider rejection such as HTTP 400 is not repeated automatically.
+# A "failed" row is retried ONLY when it is known that nothing was bought: nothing reached the provider (status=0), or
+# the reconciler proved no number exists under our nickname (NOT_FOUND_AFTER_RECONCILE). A definitive provider
+# rejection such as HTTP 400 is not repeated automatically. Retries keep the cool-down and AUTO_PROVISION_MAX_ATTEMPTS,
+# and provision_number() looks the nickname up again before buying.
 _RETRYABLE_FAILURE = "status=0"
+_RETRYABLE_FAILURES = (_RETRYABLE_FAILURE, NOT_FOUND_AFTER_RECONCILE)
 
 
 def _eligible_subscription(db: Session, org_id: uuid.UUID) -> Subscription | None:
@@ -63,7 +67,7 @@ def _may_attempt(prov: PhoneProvisioning | None, now: datetime) -> bool:
         return True
     if _released_for_lapse(prov):
         return True  # re-provision once the subscription is active again; provision_number starts a NEW generation
-    retryable = prov.status == "blocked_payment" or (prov.status == "failed" and prov.last_error == _RETRYABLE_FAILURE)
+    retryable = prov.status == "blocked_payment" or (prov.status == "failed" and prov.last_error in _RETRYABLE_FAILURES)
     if not retryable:
         return False  # purchasing / ambiguous (reconcile owns it), purchased, released, or a definitive rejection
     if prov.attempts >= cfg.AUTO_PROVISION_MAX_ATTEMPTS:
@@ -144,7 +148,7 @@ def provisioning_state(db: Session, org_id: uuid.UUID, now: datetime | None = No
         return {"state": "provisioning", "message": "Your subscription is active. We are setting up your phone number.",
                 "number": None, "retry_at": None}
     retry_at = None
-    if prov.status == "blocked_payment" or (prov.status == "failed" and prov.last_error == _RETRYABLE_FAILURE):
+    if prov.status == "blocked_payment" or (prov.status == "failed" and prov.last_error in _RETRYABLE_FAILURES):
         if prov.attempts < cfg.AUTO_PROVISION_MAX_ATTEMPTS and prov.updated_at is not None:
             retry_at = prov.updated_at + timedelta(minutes=cfg.AUTO_PROVISION_RETRY_MINUTES)
     if prov.status == "blocked_payment":
