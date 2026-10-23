@@ -170,6 +170,8 @@ export interface SubscriptionOut {
 
   // set when the customer cancelled but service continues until this date
   cancel_effective_at: string | null;
+  /** A cancel request the provider accepted but our state doesn't show yet. Absent from older backends. */
+  cancel_requested_at?: string | null;
 
   // past_due only: when the receptionist stops answering if payment isn't fixed
   service_ends_at: string | null;
@@ -376,6 +378,87 @@ export interface LeadPage {
   counts: Record<string, number>; // per status, for the search (ignores the status filter)
   limit: number;
   offset: number;
+}
+
+export interface AgentConfig {
+  id: string;
+  name: string;
+  greeting: string | null;
+  personality: string;
+  language: string;
+  voice_id: string | null;
+  tasks: Record<string, boolean>;
+  transfer_number: string | null;
+  status: string;
+  version: number;
+  synced_version: number;
+  synced: boolean;
+  supported_tasks: string[];
+  personalities: string[];
+}
+
+export interface CallHandling {
+  business_number: string | null;
+  number_state: string;
+  number_message: string;
+  receptionist_state: "not_configured" | "not_live" | "live" | "unverified";
+  receptionist_message: string;
+  sync_state: "not_configured" | "never_synced" | "pending" | "synced";
+  version: number | null;
+  synced_version: number | null;
+}
+
+export interface KnowledgeText {
+  id: string;
+  source: string;
+  text: string;
+}
+
+export interface KnowledgeFaq {
+  id: string;
+  source: string;
+  question: string;
+  answer: string;
+}
+
+export interface BusinessProfile {
+  id: string;
+  name: string;
+  industry: string | null;
+  phone: string | null;
+  address: string | null;
+  website_url: string | null;
+  description: string | null;
+  hours: Record<string, string> | null;
+  status: string;
+  services: KnowledgeText[];
+  faqs: KnowledgeFaq[];
+  policies: KnowledgeText[];
+  other_knowledge_count: number;
+}
+
+export interface BusinessProfileUpdate {
+  name: string;
+  industry: string | null;
+  phone: string | null;
+  address: string | null;
+  website_url: string | null;
+  description: string | null;
+  hours: Record<string, string> | null;
+  services: { id?: string; text: string }[];
+  faqs: { id?: string; question: string; answer: string }[];
+  policies: { id?: string; text: string }[];
+  delete_ids: string[];
+}
+
+export interface AgentConfigUpdate {
+  name: string;
+  greeting: string | null;
+  personality: string;
+  language: string;
+  voice_id: string;
+  tasks: Record<string, boolean>;
+  transfer_number: string | null;
 }
 
 export const api = {
@@ -626,6 +709,27 @@ export const api = {
         body: JSON.stringify(data),
       },
     ),
+
+  getBusinessProfile: (orgId: string, businessId: string) =>
+    request<BusinessProfile>(`/api/v1/orgs/${orgId}/businesses/${businessId}/profile`),
+
+  updateBusinessProfile: (orgId: string, businessId: string, data: BusinessProfileUpdate) =>
+    request<BusinessProfile>(`/api/v1/orgs/${orgId}/businesses/${businessId}/profile`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+
+  getAgentConfig: (orgId: string, businessId: string) =>
+    request<AgentConfig>(`/api/v1/orgs/${orgId}/agents/${businessId}/config`),
+
+  getCallHandling: (orgId: string, businessId: string) =>
+    request<CallHandling>(`/api/v1/orgs/${orgId}/agents/${businessId}/call-handling`),
+
+  saveAgentConfig: (orgId: string, businessId: string, data: AgentConfigUpdate) =>
+    request<AgentOut>(`/api/v1/orgs/${orgId}/agents/${businessId}`, {
+      method: "PUT",
+      body: JSON.stringify({ ...data, business_hours: null, after_hours_behavior: null }),
+    }),
 
   listAgents: (orgId: string) =>
     request<AgentOut[]>(

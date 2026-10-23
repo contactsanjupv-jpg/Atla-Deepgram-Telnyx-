@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Check } from "lucide-react";
 import { api, describeError, PlanOut, SubscriptionOut, UsageOut } from "@/lib/api";
 import { formatDate, formatPrice, formatUsage } from "@/lib/billing";
 import { describeSubscription, type Tone } from "@/lib/billingState";
+import { cancelNotice, cancelPhase, createCancelController, type CancelOutcome } from "@/lib/cancelFlow";
 import { usePlans } from "@/lib/usePlans";
 
 const TONE_STYLES: Record<Tone, string> = {
@@ -59,8 +60,10 @@ export function BillingPanel({ orgId, role }: { orgId: string; role: string }) {
   const [loadError, setLoadError] = useState(false);
   const [message, setMessage] = useState<{ text: string; bad: boolean } | null>(null);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
-  const [busy, setBusy] = useState<"manage" | "cancel" | null>(null);
-  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [busy, setBusy] = useState<"manage" | "cancel" | "refresh" | null>(null);
+  const [cancelOutcome, setCancelOutcome] = useState<CancelOutcome | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const noticeRef = useRef<HTMLDivElement | null>(null);
   const isOwner = role === "owner";
 
   const load = useCallback(() => {
@@ -69,6 +72,7 @@ export function BillingPanel({ orgId, role }: { orgId: string; role: string }) {
         setSub(s);
         setUsage(u);
         setLoadError(false);
+        setNowMs(Date.now());
       })
       .catch(() => setLoadError(true));
   }, [orgId]);
@@ -86,7 +90,6 @@ export function BillingPanel({ orgId, role }: { orgId: string; role: string }) {
       });
     return () => {
       live = false;
-      if (refreshTimer.current) clearTimeout(refreshTimer.current);
     };
   }, [orgId]);
 
@@ -104,26 +107,84 @@ export function BillingPanel({ orgId, role }: { orgId: string; role: string }) {
     }
   }
 
+  // One controller per org: it ignores a second submit while one is in flight and after one was accepted.
+  const cancelController = useMemo(
+    () =>
+      createCancelController({
+        cancel: () => api.cancelSubscription(orgId),
+        refresh: async () => {
+          const s = await api.getSubscription(orgId);
+          setSub(s);
+          return s;
+        },
+      }),
+    [orgId],
+  );
+
+  const accepted = cancelOutcome?.kind === "accepted";
+  const phase = cancelPhase(sub ?? null, accepted, nowMs);
+  const awaiting = phase === "pending" || phase === "stale";
+
+  // While a request is accepted but unconfirmed (including right after a reload), keep checking the server for a while.
+  useEffect(() => {
+    if (!awaiting) return;
+    let stop = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    (async () => {
+      for (const wait of [5000, 10000, 20000, 30000, 60000]) {
+        await new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, wait);
+        });
+        if (stop) return;
+        try {
+          const s = await api.getSubscription(orgId);
+          if (stop) return;
+          setSub(s);
+          setNowMs(Date.now());
+          if (s === null || s.cancel_effective_at) return;
+        } catch {
+          /* stay in the pending state and try again */
+        }
+      }
+    })();
+    return () => {
+      stop = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [awaiting, orgId]);
+
   async function cancelPlan() {
     setMessage(null);
     setBusy("cancel");
     try {
-      const res = await api.cancelSubscription(orgId);
-      setConfirmingCancel(false);
-      const ends = formatDate(res.effective_at);
-      setMessage({
-        text: ends
-          ? `Your plan is set to end on ${ends}. You keep full access until then, and you won't be charged again.`
-          : "Cancellation requested. You keep access until the end of your paid period. It can take a minute to show up here.",
-        bad: false,
-      });
-      refreshTimer.current = setTimeout(load, 4000);
-    } catch (err) {
-      setMessage({ text: describeError(err, "We couldn't cancel right now. Please try again."), bad: true });
+      const result = await cancelController.submit();
+      if (result === null) return;
+      setCancelOutcome(result.outcome);
+      setNowMs(Date.now());
+      if (result.outcome.kind !== "error") setConfirmingCancel(false); // on error the dialog stays open to retry
     } finally {
       setBusy(null);
     }
   }
+
+  async function checkAgain() {
+    setBusy("refresh");
+    try {
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function retryRequest() {
+    cancelController.allowRetry();
+    setConfirmingCancel(true);
+  }
+
+  const notice = cancelNotice(cancelOutcome, sub ?? null, phase, (e) => describeError(e, "We couldn't cancel right now. Please try again."));
+  useEffect(() => {
+    if (notice) noticeRef.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+  }, [notice?.title]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const card = "rounded-2xl border border-[var(--color-line)] bg-[var(--color-paper-raised)] p-6";
 
@@ -147,14 +208,14 @@ export function BillingPanel({ orgId, role }: { orgId: string; role: string }) {
     );
   }
 
-  const info = describeSubscription(sub);
+  const info = describeSubscription(sub, awaiting);
   const plan = sub ? plans?.find((p) => p.id === sub.plan_id) : undefined;
   const price = formatPrice(plan?.price);
   const periodStart = formatDate(sub?.current_period_start);
   const periodEnd = formatDate(sub?.current_period_end);
   const ending = sub !== null && sub.entitled && Boolean(sub.cancel_effective_at);
   const canManagePayment = sub !== null && ["active", "trialing", "past_due"].includes(sub.status);
-  const canCancel = sub !== null && sub.entitled && !sub.cancel_effective_at;
+  const canCancel = sub !== null && sub.entitled && !sub.cancel_effective_at && phase === "none";
   const needsPlan = sub === null || sub.status === "canceled";
   const showFeatures = sub !== null && sub.entitled;
   const showBilling = sub !== null && sub.status !== "canceled";
@@ -184,7 +245,8 @@ export function BillingPanel({ orgId, role }: { orgId: string; role: string }) {
               {periodStart} – {periodEnd}
             </Row>
           )}
-          {sub.entitled && !ending && periodEnd && <Row label="Next billing date">{periodEnd}</Row>}
+          {sub.entitled && !ending && !awaiting && periodEnd && <Row label="Next billing date">{periodEnd}</Row>}
+          {awaiting && periodEnd && <Row label="Current billing period ends">{periodEnd}</Row>}
           {ending && <Row label="Ends on">{formatDate(sub.cancel_effective_at)}</Row>}
         </dl>
       )}
@@ -259,13 +321,37 @@ export function BillingPanel({ orgId, role }: { orgId: string; role: string }) {
               : "Your receptionist keeps answering calls until the end of the period you've paid for. You won't be charged again."}
           </p>
           <div className="mt-3 flex flex-wrap gap-3">
-            <button onClick={cancelPlan} disabled={busy !== null} className={BTN_PRIMARY}>
+            <button onClick={cancelPlan} disabled={busy !== null} aria-busy={busy === "cancel"} className={BTN_PRIMARY}>
               {busy === "cancel" ? "Cancelling…" : "Yes, cancel my plan"}
             </button>
             <button onClick={() => setConfirmingCancel(false)} disabled={busy !== null} className={BTN_QUIET}>
               Keep my plan
             </button>
           </div>
+        </div>
+      )}
+
+      {notice && (
+        <div
+          ref={noticeRef}
+          role={notice.tone === "bad" ? "alert" : "status"}
+          data-testid="cancel-notice"
+          className={`mt-4 rounded-xl p-4 text-[13.5px] leading-relaxed ${TONE_STYLES[notice.tone]}`}
+        >
+          <p className="text-[14px] font-semibold">{notice.title}</p>
+          <p className="mt-1">{notice.body}</p>
+          {notice.action && (
+            <div className="mt-3 flex flex-wrap gap-3">
+              <button onClick={checkAgain} disabled={busy !== null} className={BTN_QUIET}>
+                {busy === "refresh" ? "Checking…" : "Check status"}
+              </button>
+              {notice.action === "retry" && isOwner && !confirmingCancel && (
+                <button onClick={retryRequest} disabled={busy !== null} className={BTN_QUIET}>
+                  Send request again
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
 

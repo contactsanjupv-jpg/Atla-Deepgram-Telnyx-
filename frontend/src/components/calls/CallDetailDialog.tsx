@@ -8,6 +8,7 @@ import { formatPhone } from "@/lib/receptionistStatus";
 import { DIRECTION_LABEL, callerLabel, endedBecause, formatCallTime, formatDuration, LEAD_STATUS_LABEL, phoneLabel, sentimentView } from "@/lib/calls";
 import { CallStatusBadge, SentimentBadge } from "./CallBadges";
 import { TranscriptBody } from "./TranscriptDialog";
+import { SETTINGS_BILLING_HREF } from "@/lib/settingsRoutes";
 
 function Fact({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -141,7 +142,7 @@ export function CallDetailDialog({
                   <div className="rounded-xl border border-[var(--color-line)] p-4 text-[13.5px]">
                     <p className="font-medium">The full transcript is part of the Growth plan</p>
                     <p className="mt-1 text-[var(--color-ink-soft)]">With Growth you can read every call word for word, with who said what and when. The summary above stays available on every plan.</p>
-                    <Link href="/dashboard/settings" className="mt-2 inline-block font-medium underline underline-offset-2">
+                    <Link href={SETTINGS_BILLING_HREF} className="mt-2 inline-block font-medium underline underline-offset-2">
                       See plans
                     </Link>
                   </div>

@@ -11,7 +11,7 @@ export interface StatusInfo {
 }
 
 /** Translate the server's billing state into plain language. Entitlement itself comes from the server (`entitled`). */
-export function describeSubscription(sub: SubscriptionOut | null): StatusInfo {
+export function describeSubscription(sub: SubscriptionOut | null, cancelPending = false): StatusInfo {
   if (sub === null) {
     return {
       label: "No plan",
@@ -29,6 +29,14 @@ export function describeSubscription(sub: SubscriptionOut | null): StatusInfo {
       tone: "warn",
       headline: `Your plan ends on ${cancelOn}`,
       detail: "Your receptionist keeps answering calls until then. You won't be charged again.",
+    };
+  }
+  if (sub.entitled && (cancelPending || sub.cancel_requested_at) && !cancelOn) {
+    return {
+      label: "Cancellation requested",
+      tone: "warn",
+      headline: "Cancellation requested, awaiting confirmation",
+      detail: `Your receptionist keeps answering calls. We'll show the confirmed end date here once the billing provider confirms it${end ? ` (your current billing period runs until ${end})` : ""}.`,
     };
   }
   if (sub.entitled && sub.status === "trialing") {

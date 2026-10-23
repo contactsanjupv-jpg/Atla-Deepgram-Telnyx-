@@ -1,4 +1,5 @@
 import type { AgentOut, CreditsOut, DashboardBucket, PhoneNumberOut, SubscriptionOut } from "./api";
+import { SETTINGS_BILLING_HREF } from "./settingsRoutes";
 import { describeSubscription } from "./billingState";
 import { creditBanner } from "./credits";
 import type { ReceptionistStatus } from "./receptionistStatus";
@@ -82,11 +83,11 @@ export function attentionItems(input: {
     });
   }
 
-  const billingAlreadyShown = status?.action?.href === "/dashboard/settings";
+  const billingAlreadyShown = status?.action?.href === SETTINGS_BILLING_HREF;
   if (sub && !billingAlreadyShown) {
     const info = describeSubscription(sub);
     if (info.tone === "warn" || info.tone === "bad") {
-      items.push({ id: "plan", tone: info.tone, title: info.headline, detail: info.detail, cta: { label: "Manage plan", href: "/dashboard/settings" } });
+      items.push({ id: "plan", tone: info.tone, title: info.headline, detail: info.detail, cta: { label: "Manage plan", href: SETTINGS_BILLING_HREF } });
     }
   }
 

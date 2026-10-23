@@ -8,6 +8,7 @@ import { api, Organization } from "@/lib/api";
 import { clearShellStatus, useShellStatus, type PlanChip } from "@/lib/useShellStatus";
 import type { ReceptionistStatus, StatusTone } from "@/lib/receptionistStatus";
 import { NAV, isActive } from "./nav";
+import { SETTINGS_BILLING_HREF } from "@/lib/settingsRoutes";
 
 const DOT: Record<StatusTone, string> = {
   ok: "bg-[var(--color-ok)]",
@@ -79,7 +80,7 @@ function PlanLink({ plan, onNavigate }: { plan: PlanChip | null; onNavigate?: ()
   if (!plan) return null;
   return (
     <Link
-      href="/dashboard/settings"
+      href={SETTINGS_BILLING_HREF}
       onClick={onNavigate}
       className="flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-[13px] hover:bg-[var(--color-line)]"
     >

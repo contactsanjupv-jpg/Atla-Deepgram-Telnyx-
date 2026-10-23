@@ -7,6 +7,7 @@ from pydantic import BaseModel, BeforeValidator, Field, field_validator, model_v
 StrId = Annotated[str, BeforeValidator(str)]
 
 _E164 = re.compile(r"^\+[1-9]\d{6,14}$")
+_LANG = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{2,4})?$")
 # The only behaviours the product genuinely supports. Anything else the
 # client sends (e.g. the old "book_appointments") is dropped, not stored.
 SUPPORTED_TASKS = ("answer_questions", "capture_leads", "take_messages", "transfer_calls")
@@ -52,6 +53,14 @@ class AgentConfigRequest(BaseModel):
     business_hours: dict | None = None  # reserved; not customer-configurable yet
     after_hours_behavior: str | None = None  # reserved; not customer-configurable yet
 
+    @field_validator("language")
+    @classmethod
+    def _language_shape(cls, v: str) -> str:
+        v = v.strip()
+        if not _LANG.match(v):
+            raise ValueError("language must look like en-US")
+        return v
+
     @field_validator("personality")
     @classmethod
     def _personality_known(cls, v: str) -> str:
@@ -93,3 +102,36 @@ class AgentOut(BaseModel):
     synced: bool = False
 
     model_config = {"from_attributes": True}
+
+
+
+class AgentConfigOut(BaseModel):
+    """The complete saved receptionist configuration, as the customer last saved it.
+    Reserved/unsupported settings (business hours, after-hours behaviour) are deliberately absent."""
+    id: str
+    name: str
+    greeting: str | None
+    personality: str
+    language: str
+    voice_id: str | None
+    tasks: dict
+    transfer_number: str | None
+    status: str
+    version: int
+    synced_version: int
+    synced: bool
+    supported_tasks: list[str]
+    personalities: list[str]
+
+
+class CallHandlingOut(BaseModel):
+    business_number: str | None
+    number_state: str  # ready | provisioning | blocked | none
+    number_message: str
+    # not_configured | not_live | live | unverified — "live" ONLY when the provider confirmed it just now.
+    receptionist_state: str
+    receptionist_message: str
+    # not_configured | never_synced | pending | synced
+    sync_state: str
+    version: int | None
+    synced_version: int | None

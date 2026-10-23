@@ -4,7 +4,7 @@ row itself is written only by the Paddle webhook, never by this endpoint.
 """
 import logging
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -20,8 +20,9 @@ from app.services.billing_status import subscription_view
 from app.services.checkout_guard import set_pending
 from app.services.checkout_recovery import release_for_new_plan, resolve_checkout
 from app.services.plans import PLANS, price_id_for_plan
+from app.services.subscription_sync import parse_dt, sync_subscription
 from app.db.base import get_db
-from app.db.models.billing import TopupPurchase
+from app.db.models.billing import Subscription, TopupPurchase
 from app.db.models.tenancy import OrganizationMember, OrgRole, User
 from app.providers.billing.paddle_billing_provider import PaddleBillingProvider
 from app.schemas.billing import CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, SubscriptionOut
@@ -113,47 +114,76 @@ def cancel_subscription(
         return {"status": "already_scheduled", "effective_at": sub.cancel_effective_at}
     try:
         provider = PaddleBillingProvider()
-        in_effect, effective_at = _cancellation_state(provider, sub.external_subscription_id)
+        remote = _cancellation_record(provider, sub.external_subscription_id)
+        in_effect, effective_at = _cancellation_state(remote)
         if in_effect:  # Paddle already has it scheduled (webhook not here yet): confirm, do not cancel again
+            _record_acceptance(db, sub, remote)
             return {"status": "already_scheduled", "effective_at": effective_at}
         try:
             provider.cancel_subscription(sub.external_subscription_id, immediately=False)
         except RuntimeError as e:
             # The request may have reached Paddle even though we saw an error (lost response / timeout), or a
             # retry may be refused because it is already scheduled. Only Paddle's own record can say which.
-            in_effect, effective_at = _cancellation_state(provider, sub.external_subscription_id)
+            remote = _cancellation_record(provider, sub.external_subscription_id)
+            in_effect, effective_at = _cancellation_state(remote)
             if not in_effect:
                 raise
             logger.warning("Cancel call failed (%s) but Paddle reports the cancellation is in effect", e)
+            _record_acceptance(db, sub, remote)
             return {"status": "already_scheduled", "effective_at": effective_at}
     except RuntimeError as e:
         logger.error("Cancel failed: %s", e)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "We couldn't cancel right now. Please try again.") from e
-    _, effective_at = _cancellation_state(provider, sub.external_subscription_id)
+    remote = _cancellation_record(provider, sub.external_subscription_id)
+    _, effective_at = _cancellation_state(remote)
+    _record_acceptance(db, sub, remote)
     return {"status": "requested", "effective_at": effective_at}
 
 
-def _cancellation_state(provider, external_subscription_id: str) -> tuple[bool, str | None]:
-    """(in_effect, effective_at) from Paddle's own subscription record. in_effect is True only if it shows the
-    subscription canceled or with a scheduled cancel; a missing record, any other state or a failed lookup is
-    "not confirmed" (False, None)."""
+def _record_acceptance(db: Session, sub: Subscription, remote: dict | None) -> None:
+    """
+    Paddle accepted the cancellation. Remember that durably (`cancel_requested_at`) so the page can say "requested,
+    awaiting confirmation" after a reload. If Paddle's own record already shows the cancellation, apply that snapshot
+    through the same stale-safe path the webhook and the reconciler use (it clears the marker); otherwise the webhook
+    or the reconciler confirms it later. Never touches entitlement, billing or refunds.
+    """
+    if sub.cancel_requested_at is None:
+        sub.cancel_requested_at = datetime.now(timezone.utc)
+    db.commit()
+    if not isinstance(remote, dict) or remote.get("id") not in (None, sub.external_subscription_id):
+        return
+    snapshot_at = parse_dt(remote.get("updated_at"))
+    if snapshot_at is None or not remote.get("status"):
+        return
+    try:
+        sync_subscription(db, remote, snapshot_at)
+        db.commit()
+    except Exception:  # noqa: BLE001 - the request is already recorded; confirmation can still come from the webhook
+        db.rollback()
+        logger.exception("Could not apply Paddle's snapshot after cancel for %s", sub.external_subscription_id)
+
+
+def _cancellation_record(provider, external_subscription_id: str) -> dict | None:
     lookup = getattr(provider, "get_subscription", None)
     if lookup is None:
-        return False, None
+        return None
     try:
         remote = lookup(external_subscription_id)
     except RuntimeError:
-        return False, None
-    if not isinstance(remote, dict):
+        return None
+    return remote if isinstance(remote, dict) else None
+
+
+def _cancellation_state(remote: dict | None) -> tuple[bool, str | None]:
+    """(in_effect, effective_at) from Paddle's own subscription record. in_effect is True only if it shows the
+    subscription canceled or with a scheduled cancel; a missing record, any other state or a failed lookup is
+    "not confirmed" (False, None)."""
+    if remote is None:
         return False, None
     scheduled = remote.get("scheduled_change")
     scheduled_cancel = isinstance(scheduled, dict) and scheduled.get("action") == "cancel"
     effective = scheduled.get("effective_at") if scheduled_cancel else None
     return (remote.get("status") == "canceled" or scheduled_cancel), effective
-
-
-def _cancellation_in_effect(provider, external_subscription_id: str) -> bool:
-    return _cancellation_state(provider, external_subscription_id)[0]
 
 
 @router.get("/manage", response_model=ManageOut)

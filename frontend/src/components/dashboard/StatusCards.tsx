@@ -5,6 +5,7 @@ import type { AgentOut, PhoneNumberOut, SubscriptionOut } from "@/lib/api";
 import { describeSubscription } from "@/lib/billingState";
 import { formatPhone, type ReceptionistStatus } from "@/lib/receptionistStatus";
 import { DOT, TEXT } from "./tone";
+import { SETTINGS_BILLING_HREF } from "@/lib/settingsRoutes";
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -103,7 +104,7 @@ export function StatusCards({
           <>
             <div className="mt-2.5 text-[18px] font-semibold">No plan yet</div>
             <p className="mt-1 text-[13.5px] text-[var(--color-ink-soft)]">Choose a plan to put your receptionist on real calls.</p>
-            <Link href="/dashboard/settings" className={linkClass}>
+            <Link href={SETTINGS_BILLING_HREF} className={linkClass}>
               See plans →
             </Link>
           </>
@@ -117,7 +118,7 @@ export function StatusCards({
               </span>
             </div>
             <p className="mt-1 break-words text-[13.5px] text-[var(--color-ink-soft)]">{info.detail}</p>
-            <Link href="/dashboard/settings" className={linkClass}>
+            <Link href={SETTINGS_BILLING_HREF} className={linkClass}>
               Manage plan →
             </Link>
           </>

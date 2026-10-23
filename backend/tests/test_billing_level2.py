@@ -11,7 +11,7 @@ from tests.test_entitlements import _ev
 
 VIEW_KEYS = {
     "plan_id", "plan_name", "status", "entitled", "features",
-    "current_period_start", "current_period_end", "cancel_effective_at", "service_ends_at",
+    "current_period_start", "current_period_end", "cancel_effective_at", "cancel_requested_at", "service_ends_at",
 }
 
 

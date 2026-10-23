@@ -1,4 +1,5 @@
 import type { AgentOut, PhoneNumberOut, SubscriptionOut } from "./api";
+import { SETTINGS_BILLING_HREF } from "./settingsRoutes";
 
 export type StatusTone = "ok" | "warn" | "bad" | "neutral";
 
@@ -64,7 +65,7 @@ export function receptionistStatus(input: {
               ? "Your payment is overdue."
               : "Your plan isn't active.",
         tone: "bad",
-        action: { label: "Fix billing", href: "/dashboard/settings" },
+        action: { label: "Fix billing", href: SETTINGS_BILLING_HREF },
       };
     }
     if (inGrace) {
@@ -73,7 +74,7 @@ export function receptionistStatus(input: {
         label: "Live",
         detail: "Your payment needs attention.",
         tone: "warn",
-        action: { label: "Fix billing", href: "/dashboard/settings" },
+        action: { label: "Fix billing", href: SETTINGS_BILLING_HREF },
       };
     }
     return {

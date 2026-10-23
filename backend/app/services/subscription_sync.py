@@ -100,6 +100,8 @@ def sync_subscription(db: Session, data: dict, occurred_at: datetime) -> bool:
     subscription.cancel_effective_at = (
         parse_dt(scheduled.get("effective_at")) if scheduled and scheduled.get("action") == "cancel" else None
     )
+    if subscription.cancel_effective_at is not None or subscription.status == "canceled":
+        subscription.cancel_requested_at = None  # confirmed by the provider: no longer "awaiting confirmation"
     period = data.get("current_billing_period") or {}
     subscription.current_period_start = parse_dt(period.get("starts_at")) or subscription.current_period_start
     subscription.current_period_end = parse_dt(period.get("ends_at")) or subscription.current_period_end

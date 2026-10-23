@@ -40,5 +40,9 @@ def subscription_view(db: Session, organization_id: uuid.UUID) -> dict | None:
         "current_period_start": sub.current_period_start,
         "current_period_end": sub.current_period_end,
         "cancel_effective_at": sub.cancel_effective_at,
+        # Accepted by the provider but not yet confirmed in our state; only meaningful while nothing is scheduled.
+        "cancel_requested_at": (
+            sub.cancel_requested_at if sub.cancel_effective_at is None and sub.status in ("trialing", "active") else None
+        ),
         "service_ends_at": service_ends_at,
     }

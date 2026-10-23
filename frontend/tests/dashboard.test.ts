@@ -51,9 +51,9 @@ test("a receptionist that is not live yet surfaces its next step", () => {
 });
 
 test("billing trouble is shown once, not twice", () => {
-  const status: ReceptionistStatus = { state: "billing", label: "Not answering calls", detail: "Your payment is overdue.", tone: "bad", action: { label: "Fix billing", href: "/dashboard/settings" } };
+  const status: ReceptionistStatus = { state: "billing", label: "Not answering calls", detail: "Your payment is overdue.", tone: "bad", action: { label: "Fix billing", href: "/dashboard/settings/billing" } };
   const items = attentionItems({ ...base, status, sub: sub({ status: "past_due", entitled: false, service_ends_at: "2026-10-01T00:00:00Z" }) });
-  assert.equal(items.filter((i) => i.cta.href === "/dashboard/settings").length, 1);
+  assert.equal(items.filter((i) => i.cta.href === "/dashboard/settings/billing").length, 1);
   assert.equal(items[0].tone, "bad");
 });
 

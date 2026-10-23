@@ -40,6 +40,10 @@ class Subscription(Base, UUIDPKMixin, TimestampMixin):
     last_event_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Set when the customer cancelled and service continues until this date.
     cancel_effective_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the customer's cancel request was accepted by the provider but our state doesn't show the cancellation yet
+    # (cancel_effective_at is still empty). Cleared as soon as the cancellation is confirmed. Keeps "requested" durable
+    # across page reloads; it never changes entitlement.
+    cancel_requested_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # When `status` last CHANGED (provider time) — drives grace-period policy.
     status_changed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
