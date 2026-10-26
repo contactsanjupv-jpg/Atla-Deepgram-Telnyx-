@@ -16,6 +16,7 @@ from app.providers.retell_client import RetellAPIError
 from app.schemas.catalog import PhoneNumberOut, PurchaseNumberRequest
 from app.services.auto_provisioning import provisioning_state
 from app.services.phone_provisioning import (
+    InvalidProvisioningRequest,
     ProvisioningFailed,
     ProvisioningInProgress,
     ProvisioningPending,
@@ -71,6 +72,8 @@ def purchase_phone_number(
 
     try:
         return provision_number(db, membership.organization_id, payload.country, payload.area_code)
+    except InvalidProvisioningRequest as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
     except ProvisioningInProgress as e:
         raise HTTPException(status.HTTP_409_CONFLICT, "We're setting up your number — one moment.") from e
     except ProvisioningPending as e:

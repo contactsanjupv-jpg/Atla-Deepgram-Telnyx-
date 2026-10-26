@@ -172,9 +172,18 @@ def test_repeated_sweeps_and_replayed_webhooks_during_recovery_never_create_a_se
     assert fake.purchases == 2 and _numbers(org) == 1 and len(fake.numbers) == 1
 
 
-def test_the_real_worker_loop_recovers_and_survives_restarts(fake):
+def test_the_real_worker_loop_recovers_and_survives_restarts(fake, monkeypatch):
     """run_worker.run_once is the worker's own pass; each call builds fresh sessions, as a restarted process would.
-    It sweeps EVERY org in the shared test database, so all counts below are for this org's nickname only."""
+    It sweeps EVERY org in the shared test database, so all counts below are for this org's nickname only.
+
+    The sweep handles at most SWEEP_LIMIT orgs per pass, in no defined order. The shared test database holds every
+    paid org without a number that the other tests left behind (hundreds by this point in a full run), so with the
+    production limit this org's retry could fall outside the window of the pass under test and the test passed or
+    failed by chance. Lifting the limit makes every pass cover every org, so the outcome no longer depends on how
+    many other tests ran. (That the limit still drains a backlog, 25 orgs per pass, is a production property.)"""
+    from app.services import auto_provisioning
+
+    monkeypatch.setattr(auto_provisioning, "SWEEP_LIMIT", 100_000)
     org = _org()
     fake.fail_5xx = 1
     fake.only = f"atla-{org}-1"  # deterministic nickname of this org's first number

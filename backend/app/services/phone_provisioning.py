@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from app.core.locks import LockNotAcquired, redis_lock
+from app.core.phone_input import InvalidPhoneInput, normalize_area_code, normalize_country
 from app.db.models.telephony import PhoneNumber, PhoneNumberStatus, PhoneProvisioning
 from app.db.models.voice_agent import Agent, AgentStatus
 from app.providers.phone.phone_provider import PhoneProvider, ProvisionedNumber
@@ -37,6 +38,11 @@ class ProvisioningPending(Exception):
 
 class ProvisioningFailed(Exception):
     pass
+
+
+class InvalidProvisioningRequest(ProvisioningFailed):
+    """The requested country/area code is not valid. Raised BEFORE anything is written, so nothing is left half-made;
+    str(exc) is a customer-safe message."""
 
 
 class ProvisioningPaymentRequired(ProvisioningFailed):
@@ -86,6 +92,11 @@ def _adopt(db: Session, prov: PhoneProvisioning, pn: ProvisionedNumber) -> Phone
 def provision_number(
     db: Session, org_id: uuid.UUID, country: str, area_code: str | None, provider: PhoneProvider | None = None
 ) -> PhoneNumber:
+    try:
+        country, area_code = normalize_country(country), normalize_area_code(area_code)
+    except InvalidPhoneInput as e:
+        logger.error("Refusing to provision a number for org %s: %s", org_id, e)
+        raise InvalidProvisioningRequest(str(e)) from e
     try:
         with redis_lock(f"provision:{org_id}", ttl_seconds=90):
             existing = active_number(db, org_id)

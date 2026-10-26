@@ -3,6 +3,9 @@ import re
 from typing import Annotated
 
 from pydantic import BaseModel, BeforeValidator, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
+
+from app.core.phone_input import InvalidPhoneInput, normalize_area_code, normalize_country
 
 StrId = Annotated[str, BeforeValidator(str)]
 
@@ -40,6 +43,22 @@ class PhoneNumberOut(BaseModel):
 class PurchaseNumberRequest(BaseModel):
     country: str = "US"
     area_code: str | None = None
+
+    @field_validator("country")
+    @classmethod
+    def _country_code(cls, v: str) -> str:
+        try:
+            return normalize_country(v)
+        except InvalidPhoneInput as e:
+            raise PydanticCustomError("country_code", str(e)) from e
+
+    @field_validator("area_code")
+    @classmethod
+    def _area_code_shape(cls, v: str | None) -> str | None:
+        try:
+            return normalize_area_code(v)
+        except InvalidPhoneInput as e:
+            raise PydanticCustomError("area_code", str(e)) from e
 
 
 class AgentConfigRequest(BaseModel):
